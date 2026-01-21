@@ -1,0 +1,15 @@
+{
+    "version": 5,
+    "op": "push",
+    "data": {
+        "state_transition": {
+            "resource": "0xfde8bac0dd393995ef7596dc4daa5fe404a7ce59366ca7424520f31c702a83b3",
+            "apriori": "0x49bda751b22be230efb6634fc48e91c5ff11f2d99c9b10747fa22c3857c63fff",
+            "aposteriori": "0x38273c62b06cb109890881e394115c6b77dc2d006d316c0a4cb0b160c4a611e0"
+        }
+    },
+    "metadata": {
+        "forward_count": 0,
+        "relay": 0
+    }
+}
