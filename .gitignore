@@ -207,7 +207,7 @@ marimo/_lsp/
 __marimo__/
 
 
-# Manual (Nick)
+# Manual ignores from the EGESS project
 data.csv
 backupdata/
 run.log
