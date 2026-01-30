@@ -106,14 +106,12 @@ def listener_protocol(config_json, node_state, state_lock, this_port, number_of_
             # If the maximum number of forwards has been reached, the message will no longer be
             # pushed forward
             return {
-                {
                 "op": "receipt",
                 "data": {
                     "success": False,
                     "message": "message is not enqueued"
                 },
                 "metadata": {}
-            }
             }
     else: # The listener protocol must not receive any other types of messages
         print("ERROR: listener_protocol: unknown type of message: {}\n".format(msg["op"]))
