@@ -5,5 +5,6 @@
     "max_forwards": 5,
     "push_queue_maxsize": 5000,
     "pull_period": 7,
-    "background_period": 5
+    "background_period": 5,
+    "default_latency": 0.5
 }

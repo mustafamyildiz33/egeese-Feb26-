@@ -135,6 +135,19 @@ def main():
     with open(node_state_init_file) as file: # Real the initial state for all nodes
         node_state = json.load(file) # Convert into JSON object. ATTENTION: this object can only be used with a state lock
 
+    # Add a latency matrix to the initial state
+    # Latency matrix represents latency in seconds between a pair of nodes
+    # As the nodes change their configuration (e.g., physically move), the 
+    # latency matrix can dynamically change to represent this.
+    node_state["latency_matrix"] = []
+
+    # Initialize the latency matrix with the default initial value
+    for i in range(number_of_nodes):
+        row = []
+        for j in range(number_of_nodes):
+            row.append(config_json["default_latency"])
+            node_state["latency_matrix"].append(row)        
+
     # State lock for thread safety of the node_state object.
     # ATTENTION: Never read or write from/to the node_state object before acquiring the state_lock first
     # ATTENTION: Make sure that the state_lock object is released right after accessing the node_state object

@@ -91,6 +91,12 @@ def send_msg(config_json, node_state, state_lock, this_port, msg, target_port):
         msg (dict[str, Any]): the JSON object to be sent.
         target_port (int): the port (i.e., node ID) of the recipient node.
     """
+    
+    # Apply the propagation delay as per the latency matrix
+    i = this_port - config_json["base_port"] # Convert port to row
+    j = target_port - config_json["base_port"] # Conver port to column
+    time.sleep(node_state["latency_matrix"][i][j]) # Apply latency
+    
     try:
         host_url = "http://" + config_json["base_host"] # Form the URL of the host (without port)
         # Send a POST request to the node with the target port
