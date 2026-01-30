@@ -62,7 +62,7 @@ def log_current_node_state(this_port, node_state):
 
 def write_data_point(this_port, logtype, message):
     """
-    Write a data point to data.csv file.
+    Write a data point to data.csv file with semicolon as a delimiter.
 
     Args:
         this_port (int): The port this node listens.
@@ -76,12 +76,25 @@ def write_data_point(this_port, logtype, message):
         # 2) the current timestamp (in floating point format);
         # 3) the unique type of the log, which allows to merge different datasets in one file;
         # 4) the message (data point payload) - make sure to avoid commas in it.
-        f.write("{},{},{},{}\n".format(this_port, time.time(), logtype, message)) # Write into the file.
+        f.write("{};{};{};{}\n".format(this_port, time.time(), logtype, message)) # Write into the file.
         f.close() # Close the file.
 
 
+def write_state_change_data_point(this_port, node_state, state_key):
+    """
+    Write a data point to data.csv file indicating the change of a state.
+    It is advised to use this function for each value changed in the state transition.
+
+    Args:
+        this_port (int): The port this node listens.
+        node_state (dict[str, Any]): The state of this current node.
+        state_key (str): The state key which value has changed.
+    """    
+    write_data_point(this_port, "state_change", "{}={}".format(state_key, node_state[state_key]))
+
 def send_msg(config_json, node_state, state_lock, this_port, msg, target_port):
-    """_summary_
+    """
+    Send a POST request with JSON to the node with the specified port.
 
     Args:
         config_json (dict[str, Any]): JSON object with all-nodes configuration.

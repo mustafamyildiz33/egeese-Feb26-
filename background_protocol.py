@@ -44,4 +44,8 @@ def background_protocol(config_json, node_state, state_lock, this_port, number_o
      node_state["background_hits"] = node_state["background_hits"] + 1
      # Log current node state (the message will appear in run.log)
      egess_api.log_current_node_state(this_port, node_state)
+     # Add the state change data point.
+     egess_api.write_state_change_data_point(this_port, node_state, "background_hits")
      state_lock.release() # Allow state access by other threads
+
+

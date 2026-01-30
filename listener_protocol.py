@@ -73,6 +73,12 @@ def listener_protocol(config_json, node_state, state_lock, this_port, number_of_
             if msg["metadata"]["relay"] not in node_state["known_nodes"] and msg["metadata"]["relay"] != 0:
                 node_state["known_nodes"].append(msg["metadata"]["relay"])
 
+            # Add the state change data point.
+            egess_api.write_state_change_data_point(this_port, node_state, "accepted_messages")
+
+            # Add the state change data point.
+            egess_api.write_state_change_data_point(this_port, node_state, "known_nodes")
+
             # We finished the atomic access to the state of the node; now allow other threads to access it.
             state_lock.release()
 
