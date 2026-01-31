@@ -11,6 +11,7 @@
 pkill -f node.py
 
 # Backup the data from the previous (most recent) run in the backupdata folder
+mkdir -p backupdata
 mv data.csv backupdata/data-`date +%s`.csv
 touch data.csv
 
