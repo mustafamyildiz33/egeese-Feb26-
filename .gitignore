@@ -13,3 +13,10 @@ __pycache__/
 # Local runs / temp outputs
 runs/
 *.log
+
+# Generated runs
+runs/
+
+# Keep sample_data/ tracked, ignore raw dumps
+backupdata/
+data.csv
