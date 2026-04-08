@@ -8,7 +8,21 @@ import time
 import egess_api
 
 
-EVENT_TYPES = ("front_alert", "stall_notice", "recovery_notice")
+EVENT_TYPES = ("front_alert", "stall_notice", "recovery_notice", "alert_state", "confirmation_notice")
+
+
+def _to_int(value, fallback):
+    try:
+        return int(value)
+    except Exception:
+        return int(fallback)
+
+
+def _to_float(value, fallback):
+    try:
+        return float(value)
+    except Exception:
+        return float(fallback)
 
 
 def _demo_mode() -> bool:
@@ -42,6 +56,12 @@ def _touch_msg_telemetry(node_state):
         "push_rx": 0,
         "pull_tx": 0,
         "push_tx": 0,
+        "pull_rx_bytes": 0,
+        "push_rx_bytes": 0,
+        "pull_tx_bytes": 0,
+        "push_tx_bytes": 0,
+        "rx_total_bytes": 0,
+        "tx_total_bytes": 0,
         "tx_ok": 0,
         "tx_fail": 0,
         "tx_timeout": 0,
@@ -116,6 +136,14 @@ def _reset_runtime_state(node_state):
     node_state["incoming_events"] = []
     node_state["seen_event_ids"] = []
     node_state["recent_alerts"] = []
+    node_state["layer1_alert"] = {}
+    node_state["layer2_confirmation"] = {}
+    node_state["last_layer1_rx"] = {}
+    node_state["last_layer2_rx"] = {}
+    node_state["prev_alert_code"] = 0
+    node_state["tomo_distance_history"] = []
+    node_state["last_published_layer1_signature"] = ""
+    node_state["last_published_layer2_signature"] = ""
 
     node_state["last_cycle_ts"] = 0.0
     node_state["last_state_change_ts"] = 0.0
@@ -130,6 +158,12 @@ def _reset_runtime_state(node_state):
         "push_rx",
         "pull_tx",
         "push_tx",
+        "pull_rx_bytes",
+        "push_rx_bytes",
+        "pull_tx_bytes",
+        "push_tx_bytes",
+        "rx_total_bytes",
+        "tx_total_bytes",
         "tx_ok",
         "tx_fail",
         "tx_timeout",
@@ -165,6 +199,7 @@ def _remember_event(node_state, mtype, event_id, origin, relay, payload):
             "relay": int(relay) if isinstance(relay, int) else 0,
             "ts": float(time.time()),
             "state": str(payload.get("state", "")) if isinstance(payload, dict) else "",
+            "phase": str(payload.get("phase", "")) if isinstance(payload, dict) else "",
         }
     )
     if len(incoming) > 120:
@@ -184,6 +219,45 @@ def _remember_event(node_state, mtype, event_id, origin, relay, payload):
         recent = recent[-20:]
     node_state["recent_alerts"] = recent
     return True
+
+
+def _store_layer_rx(node_state, mtype, payload, origin, relay):
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if str(mtype) == "alert_state":
+        bits = str(payload.get("alert_bits", "00"))
+        level = str(payload.get("alert_level", payload.get("state", "NORMAL"))).strip().upper()
+        node_state["last_layer1_rx"] = {
+            "origin": _to_int(origin, 0),
+            "relay": _to_int(relay, 0),
+            "cycle": _to_int(payload.get("cycle", 0), 0),
+            "alert_code": _to_int(payload.get("alert_code", 0), 0),
+            "alert_bits": bits,
+            "alert_level": level,
+            "summary": "L1 {} {} from {}".format(bits, level, _to_int(origin, 0)),
+            "ts": float(time.time()),
+        }
+        return
+
+    if str(mtype) == "confirmation_notice":
+        phase = str(payload.get("phase", "CLEAR")).strip().upper()
+        direction = str(payload.get("direction_label", ""))
+        distance = round(_to_float(payload.get("distance_hops", 99.0), 99.0), 1)
+        speed = round(_to_float(payload.get("speed_hops_per_cycle", 0.0), 0.0), 1)
+        eta = round(_to_float(payload.get("eta_cycles", 99.0), 99.0), 1)
+        node_state["last_layer2_rx"] = {
+            "origin": _to_int(origin, 0),
+            "relay": _to_int(relay, 0),
+            "cycle": _to_int(payload.get("cycle", 0), 0),
+            "phase": phase,
+            "direction_label": direction,
+            "distance_hops": distance,
+            "speed_hops_per_cycle": speed,
+            "eta_cycles": eta,
+            "summary": "L2 {} {} d={} eta={}".format(phase, direction or "-", distance, eta if eta < 90 else "?"),
+            "ts": float(time.time()),
+        }
 
 
 def listener_protocol(config_json, node_state, state_lock, this_port, number_of_nodes, push_queue, msg):
@@ -280,12 +354,15 @@ def listener_protocol(config_json, node_state, state_lock, this_port, number_of_
         }
 
     if op == "pull":
+        msg_size_bytes = egess_api.serialized_size_bytes(msg)
         state_lock.acquire()
         try:
             counters, _ = _touch_msg_telemetry(node_state)
             counters["pull_rx"] = int(counters.get("pull_rx", 0)) + 1
+            counters["pull_rx_bytes"] = int(counters.get("pull_rx_bytes", 0)) + int(msg_size_bytes)
+            counters["rx_total_bytes"] = int(counters.get("rx_total_bytes", 0)) + int(msg_size_bytes)
             origin = msg.get("metadata", {}).get("origin", "viz")
-            _add_recent_msg(node_state, "rx:pull <- {}".format(origin))
+            _add_recent_msg(node_state, "rx:pull <- {} bytes={}".format(origin, msg_size_bytes))
             snapshot = copy.deepcopy(node_state)
         finally:
             state_lock.release()
@@ -317,6 +394,7 @@ def listener_protocol(config_json, node_state, state_lock, this_port, number_of_
         forward_count = int(metadata.get("forward_count", 0))
     except Exception:
         forward_count = 0
+    no_forward = bool(metadata.get("no_forward", False))
 
     max_forwards = int(config_json.get("max_forwards", 8))
     if forward_count >= max_forwards:
@@ -336,9 +414,12 @@ def listener_protocol(config_json, node_state, state_lock, this_port, number_of_
 
     state_lock.acquire()
     try:
+        msg_size_bytes = egess_api.serialized_size_bytes(msg)
         counters, _ = _touch_msg_telemetry(node_state)
         counters["push_rx"] = int(counters.get("push_rx", 0)) + 1
-        _add_recent_msg(node_state, "rx:push <- {}".format(origin))
+        counters["push_rx_bytes"] = int(counters.get("push_rx_bytes", 0)) + int(msg_size_bytes)
+        counters["rx_total_bytes"] = int(counters.get("rx_total_bytes", 0)) + int(msg_size_bytes)
+        _add_recent_msg(node_state, "rx:push <- {} bytes={}".format(origin, msg_size_bytes))
         node_state["accepted_messages"] = int(node_state.get("accepted_messages", 0)) + 1
 
         if isinstance(relay, int) and relay != 0:
@@ -354,6 +435,8 @@ def listener_protocol(config_json, node_state, state_lock, this_port, number_of_
             duplicate = not _remember_event(node_state, mtype, event_id, origin, relay, data)
             if duplicate:
                 _add_recent_msg(node_state, "dup:{} {}".format(mtype, event_id))
+            else:
+                _store_layer_rx(node_state, mtype, data, origin, relay)
 
         if not _demo_mode():
             egess_api.write_state_change_data_point(this_port, node_state, "accepted_messages")
@@ -365,6 +448,18 @@ def listener_protocol(config_json, node_state, state_lock, this_port, number_of_
         return {
             "op": "receipt",
             "data": {"success": True, "message": "duplicate_ignored"},
+            "metadata": {}
+        }
+
+    if no_forward:
+        state_lock.acquire()
+        try:
+            _add_recent_msg(node_state, "consume:push local_only")
+        finally:
+            state_lock.release()
+        return {
+            "op": "receipt",
+            "data": {"success": True, "message": "message_consumed_local_only"},
             "metadata": {}
         }
 

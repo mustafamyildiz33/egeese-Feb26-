@@ -76,6 +76,22 @@ def write_state_change_data_point(this_port, node_state, state_key):
     write_data_point(this_port, "state_change", "{}={}".format(state_key, node_state.get(state_key)))
 
 
+def serialized_size_bytes(payload):
+    """Estimate the UTF-8 payload size used for protocol accounting.
+
+    Args:
+        payload: JSON-serializable payload object.
+
+    Returns:
+        Integer byte length of a compact JSON serialization.
+    """
+    try:
+        body = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    except Exception:
+        body = json.dumps(str(payload))
+    return int(len(body.encode("utf-8")))
+
+
 def _ensure_msg_counters(node_state):
     counters = node_state.get("msg_counters", {})
     if not isinstance(counters, dict):
@@ -85,6 +101,12 @@ def _ensure_msg_counters(node_state):
         "push_rx": 0,
         "pull_tx": 0,
         "push_tx": 0,
+        "pull_rx_bytes": 0,
+        "push_rx_bytes": 0,
+        "pull_tx_bytes": 0,
+        "push_tx_bytes": 0,
+        "rx_total_bytes": 0,
+        "tx_total_bytes": 0,
         "tx_ok": 0,
         "tx_fail": 0,
         "tx_timeout": 0,
@@ -114,15 +136,19 @@ def send_msg(config_json, node_state, state_lock, this_port, msg, target_port):
     i = this_port - config_json["base_port"]
     j = target_port - config_json["base_port"]
     op = str(msg.get("op", "unknown"))
+    msg_size_bytes = serialized_size_bytes(msg)
 
     state_lock.acquire()
     try:
         counters = _ensure_msg_counters(node_state)
         if op == "pull":
             counters["pull_tx"] = int(counters.get("pull_tx", 0)) + 1
+            counters["pull_tx_bytes"] = int(counters.get("pull_tx_bytes", 0)) + int(msg_size_bytes)
         elif op == "push":
             counters["push_tx"] = int(counters.get("push_tx", 0)) + 1
-        _append_recent_msg(node_state, "tx:{} -> {}".format(op, target_port))
+            counters["push_tx_bytes"] = int(counters.get("push_tx_bytes", 0)) + int(msg_size_bytes)
+        counters["tx_total_bytes"] = int(counters.get("tx_total_bytes", 0)) + int(msg_size_bytes)
+        _append_recent_msg(node_state, "tx:{} -> {} bytes={}".format(op, target_port, msg_size_bytes))
     finally:
         state_lock.release()
 
