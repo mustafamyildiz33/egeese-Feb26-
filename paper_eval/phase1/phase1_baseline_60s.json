@@ -1,0 +1,16 @@
+{
+  "suite_id": "phase1_baseline_60s",
+  "phase_id": "phase1",
+  "phase_name": "Phase 1 - Fair Baseline",
+  "protocol": "egess",
+  "challenge": "steady_state_baseline",
+  "duration_sec": 60,
+  "base_port": 9000,
+  "trigger_interval_sec": 2,
+  "node_counts": [49, 64, 81],
+  "run_count": 30,
+  "seed_base": 1001,
+  "scenario": {
+    "kind": "baseline"
+  }
+}

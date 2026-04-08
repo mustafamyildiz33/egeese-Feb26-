@@ -1,0 +1,17 @@
+{
+  "suite_id": "phase2_hazard_120s",
+  "phase_id": "phase2",
+  "phase_name": "Phase 2 - Hazard Sensing",
+  "protocol": "egess",
+  "challenge": "tornado_sweep",
+  "duration_sec": 120,
+  "base_port": 9000,
+  "trigger_interval_sec": 2,
+  "node_counts": [49, 64, 81],
+  "run_count": 30,
+  "seed_base": 2001,
+  "scenario": {
+    "kind": "tornado_sweep",
+    "tornado_width": 2
+  }
+}
