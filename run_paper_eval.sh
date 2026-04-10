@@ -16,12 +16,13 @@ OPEN_REPORT="0"
 
 usage() {
   cat <<'EOF'
-Usage: ./run_paper_eval.sh [--mode all|phase1|phase2|phase3] [--duration 60|120] [--nodes N] [--batches N] [--full] [--dry-run] [--open]
+Usage: ./run_paper_eval.sh [--mode all|phase1|phase2|phase3|phase4] [--duration 60|120] [--nodes N] [--batches N] [--full] [--dry-run] [--open]
 
 Examples:
   ./run_paper_eval.sh
   ./run_paper_eval.sh --mode all --duration 60 --batches 1 --nodes 49
   ./run_paper_eval.sh --mode phase2 --duration 120 --batches 1 --nodes 49
+  ./run_paper_eval.sh --mode phase4 --duration 60 --batches 1 --nodes 49
   ./run_paper_eval.sh --mode all --duration 60 --full --nodes 49
 EOF
 }
@@ -103,13 +104,16 @@ case "${MODE}" in
     spec="${ROOT_DIR}/paper_eval/phase1/phase1_baseline_${DURATION}s.json"
     ;;
   phase2)
-    spec="${ROOT_DIR}/paper_eval/phase2/phase2_hazard_${DURATION}s.json"
+    spec="${ROOT_DIR}/paper_eval/phase2/phase2_fire_${DURATION}s.json"
     ;;
   phase3)
-    spec="${ROOT_DIR}/paper_eval/phase3/phase3_stress_${DURATION}s.json"
+    spec="${ROOT_DIR}/paper_eval/phase3/phase3_hazard_${DURATION}s.json"
+    ;;
+  phase4)
+    spec="${ROOT_DIR}/paper_eval/phase4/phase4_stress_${DURATION}s.json"
     ;;
   *)
-    echo "--mode must be one of: all, phase1, phase2, phase3" >&2
+    echo "--mode must be one of: all, phase1, phase2, phase3, phase4" >&2
     exit 1
     ;;
 esac

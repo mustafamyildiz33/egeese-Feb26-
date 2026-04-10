@@ -14,5 +14,7 @@ __pycache__/
 runs/
 paper_reports/
 campaign_reports/
+comparison_reports/
 external/
 *.log
+.mplcache/
