@@ -12,10 +12,12 @@ import json
 import math
 import os
 import random
+import re
 import statistics
 import subprocess
 import sys
 import time
+from collections import deque
 from html import escape
 from pathlib import Path
 from urllib import request
@@ -24,6 +26,7 @@ from urllib import request
 ROOT_DIR = Path(__file__).resolve().parent
 RUNS_DIR = ROOT_DIR / "runs"
 REPORTS_DIR = ROOT_DIR / "paper_reports"
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 SUMMARY_FIELDS = [
@@ -57,6 +60,15 @@ SUMMARY_FIELDS = [
     "tx_fail_total",
     "tx_timeout_total",
     "tx_conn_error_total",
+    "detection_speed_sec",
+    "first_watch_sec",
+    "first_impact_sec",
+    "outage_sec",
+    "recovery_sec",
+    "reset_sec",
+    "false_positive_nodes",
+    "false_unavailable_refs",
+    "settle_accuracy_pct",
     "status",
 ]
 
@@ -101,7 +113,20 @@ WATCH_FIELDS = [
 ]
 
 
-SUMMARY_BY_NODES_FIELDS = ["phase_id", "challenge", "duration_sec", "nodes", "runs", "avg_total_mb", "avg_push_rx_total", "avg_tx_fail_total"]
+SUMMARY_BY_NODES_FIELDS = [
+    "phase_id",
+    "challenge",
+    "duration_sec",
+    "nodes",
+    "runs",
+    "avg_total_mb",
+    "avg_push_rx_total",
+    "avg_tx_fail_total",
+    "avg_detection_speed_sec",
+    "avg_false_positive_nodes",
+    "avg_false_unavailable_refs",
+    "avg_settle_accuracy_pct",
+]
 
 
 RUN_OVERVIEW_FIELDS = [
@@ -115,8 +140,11 @@ RUN_OVERVIEW_FIELDS = [
     "total_nodes",
     "events_total",
     "total_mb",
+    "detection_speed_sec",
     "tx_fail_total",
     "tx_timeout_total",
+    "false_positive_nodes",
+    "false_unavailable_refs",
     "status",
 ]
 
@@ -206,8 +234,25 @@ HISTORY_TOTAL_FIELDS = [
 ]
 
 
+TIMELINE_FIELDS = [
+    "milestone",
+    "time_sec",
+    "status",
+    "detail",
+]
+
+
+FIRE_STAGE_FIELDS = [
+    "stage",
+    "time_window",
+    "affected_ports",
+    "detail",
+]
+
+
 SUMMARY_CHART_FIELDS = [
     "active_duration_sec",
+    "detection_speed_sec",
     "reachable_nodes",
     "events_total",
     "fault_ops",
@@ -224,6 +269,29 @@ SUMMARY_CHART_FIELDS = [
     "tx_fail_total",
     "tx_timeout_total",
     "tx_conn_error_total",
+    "false_positive_nodes",
+    "false_unavailable_refs",
+    "settle_accuracy_pct",
+]
+
+
+NODECOUNT_COMPARE_FIELDS = [
+    "active_duration_sec",
+    "detection_speed_sec",
+    "reachable_nodes",
+    "events_total",
+    "trigger_ops",
+    "pull_rx_total",
+    "push_rx_total",
+    "pull_tx_total",
+    "push_tx_total",
+    "total_bytes",
+    "total_mb",
+    "tx_fail_total",
+    "tx_timeout_total",
+    "false_positive_nodes",
+    "false_unavailable_refs",
+    "settle_accuracy_pct",
 ]
 
 
@@ -260,7 +328,11 @@ FIELD_LABELS = {
     "checkin_detection_speed": "Check-In Detection Speed",
     "checkin_failures": "Check-In Failures",
     "checkin_setup": "Check-In Setup",
+    "avg_detection_speed_sec": "Avg Detection Speed",
+    "avg_false_positive_nodes": "Avg False Positives",
+    "avg_false_unavailable_refs": "Avg False Unavailable",
     "avg_push_rx_total": "Avg Push RX",
+    "avg_settle_accuracy_pct": "Avg Settle Accuracy",
     "avg_total_mb": "Avg MB",
     "avg_tx_fail_total": "Avg TX Fail",
     "avg": "Average",
@@ -270,6 +342,8 @@ FIELD_LABELS = {
     "coherence_score": "Coherence",
     "crash_sim": "Crash Sim",
     "current_missing_count": "Missing",
+    "detail": "Detail",
+    "detection_speed_sec": "Detection Speed",
     "direction_label": "Direction",
     "distance_hops": "Distance",
     "duration_sec": "Duration",
@@ -279,16 +353,21 @@ FIELD_LABELS = {
     "egess_setup": "EGESS Setup",
     "eta_cycles": "ETA",
     "events_total": "Events",
+    "false_positive_nodes": "False Positive Nodes",
+    "false_unavailable_refs": "False Unavailable Refs",
     "far_watch_port": "Far Port",
     "fault_ops": "Fault Ops",
     "flap": "Flap",
     "front_score": "Front",
+    "first_impact_sec": "First Impact",
+    "first_watch_sec": "First Watch",
     "impact_score": "Impact",
     "lie_sensor": "Lie Sensor",
     "latest": "Latest",
     "local_watch_port": "Local Port",
     "max": "Max",
     "metric": "Metric",
+    "milestone": "Milestone",
     "min": "Min",
     "nodes": "Nodes",
     "phase_id": "Phase",
@@ -314,7 +393,10 @@ FIELD_LABELS = {
     "sample_sec": "Sample Time",
     "scenario_label": "Scenario",
     "samples": "Samples",
+    "settle_accuracy_pct": "Settle Accuracy",
     "suite_id": "Suite",
+    "time_sec": "Time",
+    "time_window": "Time Window",
     "total_bytes": "Bytes",
     "total_mb": "MB",
     "total_nodes": "Total Nodes",
@@ -324,6 +406,11 @@ FIELD_LABELS = {
     "tx_ok_total": "TX OK",
     "tx_timeout_total": "TX Timeout",
     "tx_total_bytes": "TX Bytes",
+    "outage_sec": "Outage",
+    "recovery_sec": "Recovery",
+    "reset_sec": "Reset",
+    "affected_ports": "Affected Ports",
+    "stage": "Stage",
     "view": "View",
     "watch_port": "Watch Port",
     "accepted_messages_total": "Accepted Msgs",
@@ -591,8 +678,20 @@ def _format_display_value(field, value):
     number_int = _maybe_int(value)
     number_float = _maybe_float(value)
 
-    if field in ("duration_sec", "active_duration_sec") and number_float is not None:
+    if field in (
+        "duration_sec",
+        "active_duration_sec",
+        "detection_speed_sec",
+        "first_watch_sec",
+        "first_impact_sec",
+        "outage_sec",
+        "recovery_sec",
+        "reset_sec",
+        "time_sec",
+    ) and number_float is not None:
         return "{:.3f}s".format(float(number_float))
+    if field.endswith("_pct") and number_float is not None:
+        return "{:.1f}%".format(float(number_float))
     if field.endswith("_mb") and number_float is not None:
         return "{:.3f} MB".format(float(number_float))
     if field in ("rx_bytes_total", "tx_bytes_total", "total_bytes") and number_int is not None:
@@ -623,6 +722,8 @@ def _format_display_value(field, value):
         "tx_timeout_total",
         "tx_conn_error_total",
         "current_missing_count",
+        "false_positive_nodes",
+        "false_unavailable_refs",
         "runs",
     ) and number_int is not None:
         return "{:,}".format(int(number_int))
@@ -655,13 +756,37 @@ def _value_is_positive(field, value):
 def _cell_class(field, value):
     classes = ["col-{}".format(str(field).replace("_", "-"))]
     number = _maybe_float(value)
-    if field in ("tx_fail_total", "tx_timeout_total", "tx_conn_error_total", "current_missing_count", "avg_tx_fail_total"):
+    if field in (
+        "tx_fail_total",
+        "tx_timeout_total",
+        "tx_conn_error_total",
+        "current_missing_count",
+        "avg_tx_fail_total",
+        "false_positive_nodes",
+        "false_unavailable_refs",
+        "avg_false_positive_nodes",
+        "avg_false_unavailable_refs",
+    ):
         classes.append("metric-bad" if number and number > 0 else "metric-good")
+    elif field in ("settle_accuracy_pct", "avg_settle_accuracy_pct"):
+        classes.append("metric-good")
     elif field in ("egess_failures", "checkin_failures"):
         classes.append("metric-bad")
     elif field in ("total_mb", "avg_total_mb", "rx_bytes_total", "tx_bytes_total", "total_bytes"):
         classes.append("metric-accent")
-    elif field in ("egess_bytes", "checkin_bytes", "egess_detection_speed", "checkin_detection_speed"):
+    elif field in (
+        "egess_bytes",
+        "checkin_bytes",
+        "egess_detection_speed",
+        "checkin_detection_speed",
+        "detection_speed_sec",
+        "avg_detection_speed_sec",
+        "first_watch_sec",
+        "first_impact_sec",
+        "outage_sec",
+        "recovery_sec",
+        "reset_sec",
+    ):
         classes.append("metric-accent")
     elif field in ("events_total", "accepted_messages", "pull_rx", "push_rx", "pull_tx", "push_tx", "pull_rx_total", "push_rx_total", "pull_tx_total", "push_tx_total"):
         if _value_is_positive(field, value):
@@ -1022,6 +1147,66 @@ def _html_page(title, subtitle, cards_html, sections_html, script_html=""):
       grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
       gap: 14px;
     }}
+    .timeline-strip {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      position: relative;
+    }}
+    .timeline-item {{
+      position: relative;
+      padding-left: 16px;
+    }}
+    .timeline-item::before {{
+      content: "";
+      position: absolute;
+      left: 6px;
+      top: 18px;
+      bottom: -12px;
+      width: 2px;
+      background: linear-gradient(180deg, rgba(36, 116, 229, 0.22), rgba(17, 138, 126, 0.18));
+    }}
+    .timeline-item:last-child::before {{
+      bottom: 18px;
+    }}
+    .timeline-dot {{
+      position: absolute;
+      left: 0;
+      top: 18px;
+      width: 14px;
+      height: 14px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #2474e5, #118a7e);
+      box-shadow: 0 0 0 4px rgba(36, 116, 229, 0.10);
+    }}
+    .timeline-card {{
+      background: linear-gradient(180deg, #ffffff, #f8fbff);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 14px 14px 14px 18px;
+      min-height: 138px;
+    }}
+    .timeline-top {{
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }}
+    .timeline-top h3 {{
+      margin: 0;
+      font-size: 0.98rem;
+    }}
+    .timeline-time {{
+      font-size: 1.14rem;
+      font-weight: 800;
+      margin-bottom: 6px;
+    }}
+    .timeline-detail {{
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.45;
+    }}
     .chart-card {{
       background: linear-gradient(180deg, #ffffff, #f9fbff);
       border: 1px solid var(--line);
@@ -1038,8 +1223,51 @@ def _html_page(title, subtitle, cards_html, sections_html, script_html=""):
       color: var(--muted);
       font-size: 0.9rem;
     }}
+    .chart-annotations {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+      margin-bottom: 8px;
+    }}
+    .chart-pill {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 0.84rem;
+      font-weight: 700;
+      background: #eef2f8;
+      color: #4a5870;
+    }}
+    .chart-pill.good {{
+      background: var(--teal-soft);
+      color: #10695f;
+    }}
+    .chart-pill.bad {{
+      background: var(--red-soft);
+      color: #922d2d;
+    }}
+    .chart-pill.soft {{
+      background: #eef2f8;
+      color: #5d6b82;
+    }}
     .chart-footer {{
       margin-top: 8px;
+    }}
+    .chart-detail {{
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(239, 244, 255, 0.85);
+      border: 1px solid #dbe5f6;
+      color: #38506f;
+      font-size: 0.9rem;
+      line-height: 1.4;
+    }}
+    .chart-detail strong {{
+      color: var(--ink);
     }}
     .metric-chart {{
       width: 100%;
@@ -1050,6 +1278,17 @@ def _html_page(title, subtitle, cards_html, sections_html, script_html=""):
     .chart-axis {{
       stroke: #cfd8e8;
       stroke-width: 1;
+    }}
+    .chart-point {{
+      cursor: pointer;
+      transition: r 0.15s ease, transform 0.15s ease;
+      transform-origin: center;
+    }}
+    .chart-point:hover,
+    .chart-point:focus,
+    .chart-point.is-active {{
+      r: 4.8;
+      outline: none;
     }}
     .guide-grid,
     .control-grid,
@@ -1097,6 +1336,32 @@ def _html_page(title, subtitle, cards_html, sections_html, script_html=""):
       font-size: 0.84rem;
       text-transform: uppercase;
       letter-spacing: 0.05em;
+    }}
+    .guide-list-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px;
+    }}
+    .guide-list-card {{
+      background: linear-gradient(180deg, #ffffff, #f8fbff);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 16px;
+    }}
+    .guide-list-card h3 {{
+      margin: 0 0 10px;
+      font-size: 1rem;
+    }}
+    .guide-list {{
+      margin: 0;
+      padding-left: 18px;
+      display: grid;
+      gap: 8px;
+      color: var(--muted);
+      line-height: 1.45;
+    }}
+    .guide-list strong {{
+      color: var(--ink);
     }}
     .control-row {{
       display: flex;
@@ -1157,6 +1422,57 @@ def _html_page(title, subtitle, cards_html, sections_html, script_html=""):
       font-size: 0.88rem;
       margin-top: 4px;
     }}
+    .spotlight-banner {{
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, rgba(36, 116, 229, 0.12), rgba(17, 138, 126, 0.10));
+      border: 1px solid rgba(36, 116, 229, 0.16);
+      margin-top: 8px;
+      flex-wrap: wrap;
+    }}
+    .spotlight-banner-label {{
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 4px;
+    }}
+    .spotlight-banner-title {{
+      font-size: 1.3rem;
+      font-weight: 800;
+      margin-bottom: 4px;
+    }}
+    .spotlight-banner-subtitle {{
+      color: var(--muted);
+      font-size: 0.94rem;
+    }}
+    .spotlight-chip-row {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }}
+    .jump-chip {{
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }}
+    .jump-chip:hover {{
+      background: #f3f7ff;
+    }}
+    .jump-chip:disabled {{
+      opacity: 0.45;
+      cursor: not-allowed;
+    }}
     .spotlight-log {{
       list-style: none;
       padding: 0;
@@ -1171,6 +1487,21 @@ def _html_page(title, subtitle, cards_html, sections_html, script_html=""):
       padding: 8px 10px;
       font-size: 0.92rem;
       line-height: 1.4;
+    }}
+    .spotlight-log-tail {{
+      margin: 12px 0 0;
+      min-height: 220px;
+      max-height: 360px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #0f172a;
+      color: #dbeafe;
+      border-radius: 14px;
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      padding: 12px 14px;
+      font: 0.84rem/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
     }}
     .accent-note {{
       color: #1f63c6;
@@ -1249,6 +1580,20 @@ def _html_page(title, subtitle, cards_html, sections_html, script_html=""):
     .run-link-action:hover {{
       opacity: 0.92;
     }}
+    .spotlight-row-selectable {{
+      cursor: pointer;
+    }}
+    .spotlight-row-selectable:hover {{
+      background: rgba(36, 116, 229, 0.08) !important;
+    }}
+    .spotlight-row-selectable:focus {{
+      outline: none;
+      box-shadow: inset 0 0 0 2px rgba(36, 116, 229, 0.42);
+    }}
+    .row-selected {{
+      box-shadow: inset 0 0 0 2px rgba(17, 138, 126, 0.42);
+      background: rgba(17, 138, 126, 0.08) !important;
+    }}
     .scenario-tab-row {{
       display: flex;
       flex-wrap: wrap;
@@ -1270,6 +1615,43 @@ def _html_page(title, subtitle, cards_html, sections_html, script_html=""):
       background: linear-gradient(135deg, #2474e5, #118a7e);
       color: #ffffff;
       border-color: transparent;
+    }}
+    .nodecount-panel {{
+      display: none;
+    }}
+    .nodecount-panel.active {{
+      display: block;
+    }}
+    .delta-chip {{
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 4px 9px;
+      font-weight: 700;
+      font-size: 0.84rem;
+      margin-right: 6px;
+      white-space: nowrap;
+    }}
+    .delta-up {{
+      background: rgba(180, 83, 9, 0.12);
+      color: #9a4f08;
+    }}
+    .delta-down {{
+      background: rgba(15, 118, 110, 0.12);
+      color: #0f766e;
+    }}
+    .delta-flat {{
+      background: #eef2f8;
+      color: #617086;
+    }}
+    .delta-subnote {{
+      color: var(--muted);
+      font-size: 0.84rem;
+      white-space: nowrap;
+    }}
+    .compare-current {{
+      background: rgba(36, 116, 229, 0.08) !important;
+      box-shadow: inset 0 0 0 1px rgba(36, 116, 229, 0.16);
     }}
     details {{
       margin-top: 14px;
@@ -1295,6 +1677,32 @@ def _html_page(title, subtitle, cards_html, sections_html, script_html=""):
     {cards}
     {sections}
   </main>
+  <script>
+    (() => {{
+      const cards = Array.from(document.querySelectorAll('.interactive-chart-card'));
+      cards.forEach((card) => {{
+        const detail = card.querySelector('.chart-detail');
+        const points = Array.from(card.querySelectorAll('.chart-point'));
+        if (!detail || !points.length) return;
+
+        const updateDetail = (point) => {{
+          points.forEach((item) => item.classList.toggle('is-active', item === point));
+          const label = point.getAttribute('data-label') || '';
+          const value = point.getAttribute('data-value-display') || point.getAttribute('data-value') || '';
+          const delta = point.getAttribute('data-delta-display') || 'n/a';
+          detail.innerHTML = `<strong>${{label}}</strong> · value ${{value}} · delta ${{delta}}`;
+        }};
+
+        points.forEach((point) => {{
+          point.addEventListener('mouseenter', () => updateDetail(point));
+          point.addEventListener('focus', () => updateDetail(point));
+          point.addEventListener('click', () => updateDetail(point));
+        }});
+
+        updateDetail(points[points.length - 1]);
+      }});
+    }})();
+  </script>
   {script_html}
 </body>
 </html>""".format(
@@ -1311,6 +1719,30 @@ def _write_text(path, content):
         handle.write(content)
 
 
+def _strip_ansi(text):
+    return ANSI_ESCAPE_RE.sub("", str(text or ""))
+
+
+def _tail_text_lines(path, max_lines=40):
+    file_path = Path(path)
+    if not file_path.exists():
+        return []
+    out = deque(maxlen=max_lines)
+    with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
+        for raw_line in handle:
+            line = _strip_ansi(raw_line.rstrip("\n")).strip()
+            if line:
+                out.append(line)
+    return list(out)
+
+
+def _node_log_tails(run_dir, ports, max_lines=40):
+    out = {}
+    for port in sorted({_to_int(port, -1) for port in ports if _to_int(port, -1) >= 0}):
+        out[str(port)] = _tail_text_lines(Path(run_dir) / "node_{}.log".format(int(port)), max_lines=max_lines)
+    return out
+
+
 def _load_jsonl(path):
     rows = []
     file_path = Path(path)
@@ -1324,6 +1756,288 @@ def _load_jsonl(path):
     return rows
 
 
+def _resolved_protocol_state_from_state(state):
+    state = state if isinstance(state, dict) else {}
+    protocol_state = str(state.get("protocol_state", "")).strip().upper()
+    if protocol_state:
+        return protocol_state
+    if bool(state.get("DESTROYED", False)):
+        return "DESTROYED"
+    if bool(state.get("SURVEYING", False)):
+        return "SURVEYING"
+    if bool(state.get("ALARMED", False)):
+        return "ALARMED"
+    if bool(state.get("ON_FIRE", False)):
+        return "ON_FIRE"
+    if bool(state.get("NORMAL", False)):
+        return "NORMAL"
+    return ""
+
+
+def _resolved_phase_from_state(state):
+    state = state if isinstance(state, dict) else {}
+    layer2 = state.get("layer2_confirmation", {}) if isinstance(state.get("layer2_confirmation"), dict) else {}
+    phase = str(layer2.get("phase", "")).strip().upper()
+    if phase:
+        return phase
+    return _resolved_protocol_state_from_state(state)
+
+
+def _is_normalish_label(text):
+    return str(text or "").strip().upper() in ("", "NORMAL", "STABLE", "CLEAR")
+
+
+def _false_unavailable_refs_from_state(state):
+    state = state if isinstance(state, dict) else {}
+    refs = set()
+
+    current_missing = state.get("current_missing_neighbors", [])
+    if isinstance(current_missing, list):
+        refs.update(str(item) for item in current_missing if str(item).strip())
+
+    persistent_missing = state.get("persistent_missing_neighbors", [])
+    if isinstance(persistent_missing, list):
+        refs.update(str(item) for item in persistent_missing if str(item).strip())
+
+    new_missing = state.get("new_missing_neighbors", [])
+    if isinstance(new_missing, list):
+        refs.update(str(item) for item in new_missing if str(item).strip())
+
+    surveying_targets = state.get("surveying_targets", {})
+    if isinstance(surveying_targets, dict):
+        refs.update(str(key) for key in surveying_targets.keys() if str(key).strip())
+
+    neighbor_states = state.get("neighbor_states", {})
+    if isinstance(neighbor_states, dict):
+        for key, value in neighbor_states.items():
+            if not str(key).strip():
+                continue
+            if isinstance(value, dict):
+                unavailable = (
+                    bool(value.get("DESTROYED", False))
+                    or bool(value.get("UNAVAILABLE", False))
+                    or value.get("available") is False
+                )
+                if unavailable:
+                    refs.add(str(key))
+
+    return len(refs)
+
+
+def _false_positive_flag_from_state(state):
+    protocol_state = _resolved_protocol_state_from_state(state)
+    phase = _resolved_phase_from_state(state)
+    if not _is_normalish_label(protocol_state):
+        return 1
+    if not _is_normalish_label(phase):
+        return 1
+    if _false_unavailable_refs_from_state(state) > 0:
+        return 1
+    return 0
+
+
+def _history_row_has_hazard_signal(row):
+    state = str(row.get("protocol_state", "")).strip().upper()
+    phase = str(row.get("phase", "")).strip().upper()
+    if not _is_normalish_label(state):
+        return True
+    if not _is_normalish_label(phase):
+        return True
+    if _to_int(row.get("current_missing_count", 0), 0) > 0:
+        return True
+    for field in ("crash_sim", "lie_sensor", "flap"):
+        if _boolish(row.get(field, "")):
+            return True
+    return False
+
+
+def _history_row_is_impact(row):
+    return _history_row_has_hazard_signal(row)
+
+
+def _event_at_sec(row):
+    data = row.get("data", {}) if isinstance(row, dict) else {}
+    if isinstance(data, dict):
+        number = _maybe_float(data.get("at_sec"))
+        if number is not None:
+            return float(number)
+    return None
+
+
+def _event_label(row):
+    data = row.get("data", {}) if isinstance(row, dict) else {}
+    if isinstance(data, dict):
+        return str(data.get("label", "")).strip()
+    return ""
+
+
+def _event_port(row):
+    data = row.get("data", {}) if isinstance(row, dict) else {}
+    if isinstance(data, dict):
+        return _to_int(data.get("port", 0), 0)
+    return 0
+
+
+def _first_matching_event(events_rows, predicate):
+    for row in sorted(events_rows or [], key=lambda item: (_event_at_sec(item) if _event_at_sec(item) is not None else 1e9, str(item.get("ts", "")))):
+        if predicate(row):
+            return row
+    return None
+
+
+def _history_rows_for_port(history_rows, port):
+    out = []
+    for row in history_rows or []:
+        if _to_int(row.get("port", -1), -1) != int(port):
+            continue
+        if str(row.get("error", "")).strip():
+            continue
+        out.append(row)
+    out.sort(key=lambda row: (_to_int(row.get("sample_index", 0), 0), _to_float(row.get("sample_sec", 0.0), 0.0)))
+    return out
+
+
+def _first_matching_history_row(history_rows, port, predicate):
+    for row in _history_rows_for_port(history_rows, port):
+        if predicate(row):
+            return row
+    return None
+
+
+def _timeline_row(milestone, time_sec=None, status="", detail=""):
+    return {
+        "milestone": str(milestone),
+        "time_sec": "" if time_sec is None else round(float(time_sec), 3),
+        "status": str(status),
+        "detail": str(detail),
+    }
+
+
+def _derive_run_timeline(spec, manifest, history_rows, events_rows):
+    watch_ports = manifest.get("watch_ports", {}) if isinstance(manifest, dict) else {}
+    local_port = _to_int(watch_ports.get("LOCAL", 0), 0)
+    scenario_kind = str(spec.get("scenario", {}).get("kind", "")).strip().lower()
+
+    first_watch_row = _first_matching_history_row(history_rows, local_port, _history_row_has_hazard_signal) if local_port > 0 else None
+    first_impact_row = _first_matching_history_row(history_rows, local_port, _history_row_is_impact) if local_port > 0 else None
+
+    def has_label_prefix(prefix):
+        return lambda row: _event_label(row).startswith(prefix)
+
+    def has_label_text(*needles):
+        lowered = [str(needle).lower() for needle in needles]
+        return lambda row: any(needle in _event_label(row).lower() for needle in lowered)
+
+    ignition_event = None
+    if scenario_kind == "firebomb":
+        ignition_event = _first_matching_event(events_rows, has_label_prefix("fire_front_step_1"))
+    elif scenario_kind == "tornado_sweep":
+        ignition_event = _first_matching_event(events_rows, has_label_prefix("tornado_step_1"))
+    elif scenario_kind == "ghost_outage_noise":
+        ignition_event = _first_matching_event(events_rows, has_label_text("ghost_outage_on", "lie_sensor_on", "flap_on"))
+    elif scenario_kind == "baseline":
+        ignition_event = _first_matching_event(events_rows, lambda row: str(row.get("kind", "")) == "stage" and str((row.get("data") or {}).get("name", "")) == "active_window_start")
+
+    outage_event = _first_matching_event(
+        events_rows,
+        lambda row: (
+            str(row.get("kind", "")) == "fault"
+            and (
+                str((row.get("data") or {}).get("fault", "")).strip().lower() == "crash_sim"
+                and bool((row.get("data") or {}).get("enable", False))
+                or "impact" in _event_label(row).lower()
+                or _event_label(row).lower().startswith("tornado_step_")
+            )
+        )
+        or (
+            str(row.get("kind", "")) == "state"
+            and str((row.get("data") or {}).get("sensor_state", "")).strip().upper() in ("DESTROYED",)
+        ),
+    )
+    recovery_event = _first_matching_event(
+        events_rows,
+        lambda row: "recover" in _event_label(row).lower()
+        or (
+            str(row.get("kind", "")) == "state"
+            and str((row.get("data") or {}).get("sensor_state", "")).strip().upper() in ("RECOVERING", "SURVEYING")
+        ),
+    )
+    reset_event = _first_matching_event(
+        events_rows,
+        lambda row: "reset" in _event_label(row).lower()
+        or (
+            str(row.get("kind", "")) == "state"
+            and str((row.get("data") or {}).get("sensor_state", "")).strip().upper() == "NORMAL"
+        ),
+    )
+
+    first_watch_sec = _to_float(first_watch_row.get("sample_sec", 0.0), 0.0) if first_watch_row else None
+    first_impact_sec = _to_float(first_impact_row.get("sample_sec", 0.0), 0.0) if first_impact_row else None
+    ignition_sec = _event_at_sec(ignition_event)
+    outage_sec = _event_at_sec(outage_event)
+    recovery_sec = _event_at_sec(recovery_event)
+    reset_sec = _event_at_sec(reset_event)
+
+    timeline_rows = [
+        _timeline_row("Ignition", ignition_sec, "Observed" if ignition_sec is not None else "n/a", _event_label(ignition_event) or "No ignition event logged"),
+        _timeline_row(
+            "First Watch",
+            first_watch_sec,
+            "Observed" if first_watch_sec is not None else "n/a",
+            "LOCAL watch port {} first showed a hazard signal".format(local_port) if first_watch_sec is not None and local_port > 0 else "LOCAL watch did not show a hazard signal",
+        ),
+        _timeline_row(
+            "First Impact",
+            first_impact_sec,
+            "Observed" if first_impact_sec is not None else "n/a",
+            "First local non-normal phase or state sample" if first_impact_sec is not None else "No impact sample recorded",
+        ),
+        _timeline_row("Outage", outage_sec, "Observed" if outage_sec is not None else "n/a", _event_label(outage_event) or "No outage event logged"),
+        _timeline_row("Recovery", recovery_sec, "Observed" if recovery_sec is not None else "n/a", _event_label(recovery_event) or "No recovery event logged"),
+        _timeline_row("Reset", reset_sec, "Observed" if reset_sec is not None else "n/a", _event_label(reset_event) or "No reset event logged"),
+    ]
+    metrics = {
+        "detection_speed_sec": first_watch_sec,
+        "first_watch_sec": first_watch_sec,
+        "first_impact_sec": first_impact_sec,
+        "outage_sec": outage_sec,
+        "recovery_sec": recovery_sec,
+        "reset_sec": reset_sec,
+    }
+    return timeline_rows, metrics
+
+
+def _fire_stage_rows(events_rows):
+    labels = {
+        "Ignition": ("fire_front_step_1",),
+        "Front Expansion": tuple("fire_front_step_{}".format(idx) for idx in range(1, 32)),
+        "Bomb Core": ("bomb_core_impact", "bomb_core_recover"),
+        "Recovery": tuple("fire_recover_step_{}".format(idx) for idx in range(1, 32)) + ("fire_reset",),
+    }
+    out = []
+    rows = events_rows or []
+    for stage, label_prefixes in labels.items():
+        matching = [row for row in rows if _event_label(row) and any(_event_label(row).startswith(prefix) for prefix in label_prefixes)]
+        if not matching:
+            continue
+        times = [value for value in (_event_at_sec(row) for row in matching) if value is not None]
+        ports = sorted({str(_event_port(row)) for row in matching if _event_port(row) > 0})
+        first_label = _event_label(matching[0])
+        if times:
+            window = "{:.3f}s".format(times[0]) if len(set(times)) == 1 else "{:.3f}s to {:.3f}s".format(min(times), max(times))
+        else:
+            window = "n/a"
+        out.append(
+            {
+                "stage": stage,
+                "time_window": window,
+                "affected_ports": ", ".join(ports[:10]) + (" ..." if len(ports) > 10 else ""),
+                "detail": first_label,
+            }
+        )
+    return out
+
+
 def _node_row_from_state(port, reachable, state=None, counters=None, error=""):
     state = state if isinstance(state, dict) else {}
     counters = counters if isinstance(counters, dict) else {}
@@ -1333,7 +2047,7 @@ def _node_row_from_state(port, reachable, state=None, counters=None, error=""):
     return {
         "port": int(port),
         "reachable": bool(reachable),
-        "protocol_state": str(state.get("protocol_state", "")),
+        "protocol_state": _resolved_protocol_state_from_state(state),
         "boundary_kind": str(state.get("boundary_kind", "")),
         "accepted_messages": _to_int(state.get("accepted_messages", 0), 0),
         "pull_rx": _to_int(counters.get("pull_rx", 0), 0),
@@ -1345,8 +2059,8 @@ def _node_row_from_state(port, reachable, state=None, counters=None, error=""):
         "total_bytes": int(total_bytes),
         "total_mb": round(float(total_bytes) / 1048576.0, 3),
         "direction_label": str(layer2.get("direction_label", "")),
-        "phase": str(layer2.get("phase", "")),
-        "current_missing_count": len(state.get("current_missing_neighbors", [])) if isinstance(state.get("current_missing_neighbors"), list) else 0,
+        "phase": _resolved_phase_from_state(state),
+        "current_missing_count": _false_unavailable_refs_from_state(state),
         "crash_sim": bool(faults.get("crash_sim", False)),
         "lie_sensor": bool(faults.get("lie_sensor", False)),
         "flap": bool(faults.get("flap", False)),
@@ -1453,10 +2167,36 @@ def _series_points(rows, field, label_fn):
     return points
 
 
-def _series_svg(points, color):
+def _delta_display(field, value):
+    number = _maybe_float(value)
+    if number is None:
+        return "n/a"
+    sign = "+" if float(number) > 0 else ""
+    return "{}{}".format(sign, _format_display_value(field, float(number)))
+
+
+def _series_records(points):
+    records = []
+    prev_value = None
+    for idx, (label, value) in enumerate(points):
+        delta = None if prev_value is None else float(value) - float(prev_value)
+        records.append(
+            {
+                "index": int(idx),
+                "label": str(label),
+                "value": float(value),
+                "delta": None if delta is None else float(delta),
+            }
+        )
+        prev_value = float(value)
+    return records
+
+
+def _series_svg(points, color, field):
     if not points:
         return '<div class="chart-empty">No data</div>'
 
+    records = _series_records(points)
     width = 360.0
     height = 150.0
     pad_x = 14.0
@@ -1474,23 +2214,43 @@ def _series_svg(points, color):
 
     coords = []
     fill_coords = []
-    for idx, (_, value) in enumerate(points):
+    for idx, record in enumerate(records):
+        value = float(record["value"])
         x = pad_x + (idx * step_x if len(points) > 1 else usable_w / 2.0)
         ratio = (float(value) - min_v) / (max_v - min_v)
         y = pad_top + ((1.0 - ratio) * usable_h)
-        coords.append((x, y))
+        coords.append((x, y, record))
         fill_coords.append("{:.2f},{:.2f}".format(x, y))
 
-    polyline = " ".join("{:.2f},{:.2f}".format(x, y) for x, y in coords)
+    polyline = " ".join("{:.2f},{:.2f}".format(x, y) for x, y, _ in coords)
     fill_poly = " ".join(
         ["{:.2f},{:.2f}".format(coords[0][0], height - pad_bottom)]
         + fill_coords
         + ["{:.2f},{:.2f}".format(coords[-1][0], height - pad_bottom)]
     )
-    circles = "".join(
-        '<circle cx="{:.2f}" cy="{:.2f}" r="2.8" fill="{}"></circle>'.format(x, y, escape(color))
-        for x, y in coords
-    )
+    circles = []
+    for x, y, record in coords:
+        label = str(record.get("label", ""))
+        value = float(record.get("value", 0.0))
+        delta = record.get("delta")
+        value_display = _format_display_value(field, round(value, 3))
+        delta_display = "start"
+        if delta is not None:
+            delta_display = _delta_display(field, round(float(delta), 3))
+        title = "{} | {} | delta {}".format(label, value_display, delta_display)
+        circles.append(
+            '<circle cx="{x:.2f}" cy="{y:.2f}" r="3.2" fill="{color}" class="chart-point" tabindex="0" data-label="{label}" data-value="{value}" data-delta="{delta}" data-value-display="{value_display}" data-delta-display="{delta_display}"><title>{title}</title></circle>'.format(
+                x=x,
+                y=y,
+                color=escape(color),
+                label=escape(label),
+                value=escape(str(round(value, 3))),
+                delta=escape("" if delta is None else str(round(float(delta), 3))),
+                value_display=escape(str(value_display)),
+                delta_display=escape(str(delta_display)),
+                title=escape(title),
+            )
+        )
     return """<svg viewBox="0 0 {w} {h}" class="metric-chart" role="img" aria-label="metric chart">
   <line x1="{px}" y1="{base}" x2="{wx}" y2="{base}" class="chart-axis"></line>
   <line x1="{px}" y1="{pt}" x2="{px}" y2="{base}" class="chart-axis"></line>
@@ -1506,9 +2266,146 @@ def _series_svg(points, color):
         base=height - pad_bottom,
         fill_poly=fill_poly,
         polyline=polyline,
-        circles=circles,
+        circles="".join(circles),
         color=escape(color),
     )
+
+
+def _matplotlib_pyplot():
+    cache_dir = ROOT_DIR / ".mplcache"
+    cache_dir.mkdir(exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(cache_dir))
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    return plt
+
+
+def _write_line_figure(export_dir, stem, rows, field, label_fn, title, color="#2474e5"):
+    points = _series_points(rows, field, label_fn)
+    if not points:
+        return None
+    export_dir.mkdir(parents=True, exist_ok=True)
+    tsv_path = export_dir / "{}.tsv".format(stem)
+    png_path = export_dir / "{}.png".format(stem)
+    _write_tsv(
+        tsv_path,
+        [{"label": label, "value": round(value, 3)} for label, value in points],
+        ["label", "value"],
+    )
+    plt = _matplotlib_pyplot()
+    fig, ax = plt.subplots(figsize=(8.8, 4.8), dpi=180)
+    x = list(range(len(points)))
+    y = [value for _, value in points]
+    ax.plot(x, y, marker="o", linewidth=2.3, markersize=4.5, color=color)
+    ax.fill_between(x, y, color=color, alpha=0.12)
+    ax.set_title(title, fontsize=12, fontweight="bold")
+    ax.set_xlabel("Sample")
+    ax.set_ylabel(_field_label(field))
+    if len(points) <= 12:
+        ticks = x
+    else:
+        step = max(1, len(points) // 10)
+        ticks = list(range(0, len(points), step))
+        if ticks[-1] != x[-1]:
+            ticks.append(x[-1])
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([points[idx][0] for idx in ticks], rotation=35, ha="right", fontsize=8)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(png_path)
+    plt.close(fig)
+    return {
+        "png": "figure_exports/{}.png".format(stem),
+        "tsv": "figure_exports/{}.tsv".format(stem),
+    }
+
+
+def _write_timeline_figure(export_dir, timeline_rows):
+    rows = [row for row in timeline_rows if _maybe_float(row.get("time_sec")) is not None]
+    export_dir.mkdir(parents=True, exist_ok=True)
+    tsv_path = export_dir / "timeline.tsv"
+    png_path = export_dir / "timeline.png"
+    _write_tsv(tsv_path, timeline_rows, TIMELINE_FIELDS)
+    if not rows:
+        return {"png": "", "tsv": "figure_exports/timeline.tsv"}
+    plt = _matplotlib_pyplot()
+    fig, ax = plt.subplots(figsize=(8.8, 3.8), dpi=180)
+    y_positions = list(range(len(rows)))
+    x_values = [_to_float(row.get("time_sec", 0.0), 0.0) for row in rows]
+    labels = [str(row.get("milestone", "")) for row in rows]
+    ax.hlines(y_positions, 0, x_values, color="#d9e1ef", linewidth=2.0)
+    ax.scatter(x_values, y_positions, color="#118a7e", s=52, zorder=3)
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels(labels)
+    ax.set_xlabel("Seconds into run")
+    ax.set_title("Run Timeline", fontsize=12, fontweight="bold")
+    ax.grid(True, axis="x", linestyle="--", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(png_path)
+    plt.close(fig)
+    return {
+        "png": "figure_exports/timeline.png",
+        "tsv": "figure_exports/timeline.tsv",
+    }
+
+
+def _write_figure_readme(export_dir, title, lines):
+    export_dir.mkdir(parents=True, exist_ok=True)
+    readme_path = export_dir / "README.md"
+    content = ["# {}".format(title), ""] + ["- {}".format(line) for line in lines]
+    _write_text(readme_path, "\n".join(content) + "\n")
+    return "figure_exports/README.md"
+
+
+def _write_run_figure_exports(run_dir, history_totals_rows, local_history, far_history, timeline_rows):
+    export_dir = run_dir / "figure_exports"
+    links = []
+    created = []
+    for payload in [
+        _write_timeline_figure(export_dir, timeline_rows),
+        _write_line_figure(export_dir, "network_total_mb", history_totals_rows, "total_mb", _sample_label, "Network Total MB Over Time", color="#ff7a59"),
+        _write_line_figure(export_dir, "local_watch_total_mb", local_history, "total_mb", _sample_label, "Local Watch MB Over Time", color="#c58f10"),
+        _write_line_figure(export_dir, "far_watch_total_mb", far_history, "total_mb", _sample_label, "Far Watch MB Over Time", color="#2474e5"),
+        _write_line_figure(export_dir, "local_watch_msgs", local_history, "accepted_messages", _sample_label, "Local Watch Accepted Messages", color="#118a7e"),
+    ]:
+        if not payload:
+            continue
+        if payload.get("png"):
+            links.append((Path(payload["png"]).name, payload["png"]))
+            created.append(payload["png"])
+        if payload.get("tsv"):
+            links.append((Path(payload["tsv"]).name, payload["tsv"]))
+            created.append(payload["tsv"])
+    readme_href = _write_figure_readme(export_dir, "Run Figure Exports", created or ["No figures were generated for this run."])
+    links.insert(0, ("figure_exports/README.md", readme_href))
+    return links
+
+
+def _write_suite_figure_exports(report_dir, summary_rows):
+    export_dir = report_dir / "figure_exports"
+    links = []
+    created = []
+    figure_specs = [
+        ("suite_total_mb", "total_mb", "Suite Total MB By Run", "#ff7a59"),
+        ("suite_detection_speed", "detection_speed_sec", "Suite Detection Speed By Run", "#2474e5"),
+        ("suite_failures", "tx_fail_total", "Suite TX Failures By Run", "#c73a3a"),
+        ("suite_false_positive_nodes", "false_positive_nodes", "Suite False Positive Nodes By Run", "#8b4cd6"),
+        ("suite_false_unavailable_refs", "false_unavailable_refs", "Suite False Unavailable Refs By Run", "#c58f10"),
+        ("suite_settle_accuracy", "settle_accuracy_pct", "Suite Settle Accuracy By Run", "#118a7e"),
+    ]
+    for stem, field, title, color in figure_specs:
+        payload = _write_line_figure(export_dir, stem, summary_rows, field, _run_label, title, color=color)
+        if not payload:
+            continue
+        links.append((Path(payload["png"]).name, payload["png"]))
+        links.append((Path(payload["tsv"]).name, payload["tsv"]))
+        created.extend([payload["png"], payload["tsv"]])
+    readme_href = _write_figure_readme(export_dir, "Suite Figure Exports", created or ["No figures were generated for this suite."])
+    links.insert(0, ("figure_exports/README.md", readme_href))
+    return links
 
 
 def _render_chart_grid_html(title, rows, fields, label_fn, subtitle=""):
@@ -1518,19 +2415,44 @@ def _render_chart_grid_html(title, rows, fields, label_fn, subtitle=""):
         points = _series_points(rows, field, label_fn)
         if not points:
             continue
+        records = _series_records(points)
         values = [value for _, value in points]
+        rises = [record for record in records if record.get("delta") is not None and float(record.get("delta")) > 0]
+        drops = [record for record in records if record.get("delta") is not None and float(record.get("delta")) < 0]
+        biggest_rise = max(rises, key=lambda item: float(item.get("delta", 0.0))) if rises else None
+        biggest_drop = min(drops, key=lambda item: float(item.get("delta", 0.0))) if drops else None
+        rise_html = (
+            '<span class="chart-pill good">Rise {} at {}</span>'.format(
+                escape(_delta_display(field, biggest_rise.get("delta"))),
+                escape(str(biggest_rise.get("label", ""))),
+            )
+            if biggest_rise
+            else '<span class="chart-pill soft">No rise detected</span>'
+        )
+        drop_html = (
+            '<span class="chart-pill bad">Drop {} at {}</span>'.format(
+                escape(_delta_display(field, biggest_drop.get("delta"))),
+                escape(str(biggest_drop.get("label", ""))),
+            )
+            if biggest_drop
+            else '<span class="chart-pill soft">No drop detected</span>'
+        )
         charts.append(
-            """<div class="chart-card">
+            """<div class="chart-card interactive-chart-card">
   <div class="chart-title">{title}</div>
   <div class="chart-stats">avg {avg} | min {minv} | max {maxv}</div>
+  <div class="chart-annotations">{rise}{drop}</div>
   {svg}
+  <div class="chart-detail">Hover or click a point to see the exact label, value, and delta.</div>
   <div class="chart-footer">{first} to {last}</div>
 </div>""".format(
                 title=escape(_field_label(field)),
                 avg=escape(_format_display_value(field, round(statistics.mean(values), 3))),
                 minv=escape(_format_display_value(field, round(min(values), 3))),
                 maxv=escape(_format_display_value(field, round(max(values), 3))),
-                svg=_series_svg(points, colors[idx % len(colors)]),
+                rise=rise_html,
+                drop=drop_html,
+                svg=_series_svg(points, colors[idx % len(colors)], field),
                 first=escape(points[0][0]),
                 last=escape(points[-1][0]),
             )
@@ -1555,7 +2477,13 @@ def _sample_label(row, _idx):
     return str(row.get("sample_label", ""))
 
 
-def _node_spotlight_payload(evidence):
+def _node_spotlight_payload(evidence, watch_ports=None):
+    watch_map = {}
+    if isinstance(watch_ports, dict):
+        for label, port in watch_ports.items():
+            port_int = _maybe_int(port)
+            if port_int is not None:
+                watch_map[int(port_int)] = str(label).strip().upper()
     payload = []
     for port in sorted(evidence.get("nodes", {}).keys(), key=lambda item: int(item)):
         node_info = evidence.get("nodes", {}).get(str(port), {})
@@ -1573,8 +2501,112 @@ def _node_spotlight_payload(evidence):
         row["pull_cycles"] = _to_int(state.get("pull_cycles", 0), 0)
         row["incoming_events_count"] = len(state.get("incoming_events", [])) if isinstance(state.get("incoming_events"), list) else 0
         row["known_nodes_count"] = len(state.get("known_nodes", [])) if isinstance(state.get("known_nodes"), list) else 0
+        row["watch_role"] = watch_map.get(int(row["port"]), "")
+        summary_bits = [str(row["port"])]
+        if row["watch_role"]:
+            summary_bits.append("{} watch".format(str(row["watch_role"]).title()))
+        if str(row.get("protocol_state", "")).strip():
+            summary_bits.append(str(row.get("protocol_state", "")).strip())
+        summary_bits.append("{:.3f} MB".format(_to_float(row.get("total_mb", 0.0), 0.0)))
+        row["summary_label"] = " · ".join(summary_bits)
         payload.append(row)
     return payload
+
+
+def _render_field_reference_html():
+    groups = [
+        (
+            "Core Terms",
+            [
+                ("TX", "Traffic sent by the node."),
+                ("RX", "Traffic received by the node."),
+                ("Pull", "Polling traffic where one node asks another node for state."),
+                ("Push", "Dissemination traffic sent without first being asked."),
+                ("LOCAL", "The watched node closest to the scenario focus or first impact area."),
+                ("FAR", "The watched node farthest from LOCAL, useful for propagation and scaling."),
+            ],
+        ),
+        (
+            "Run Summary",
+            [
+                ("Phase", "The experiment family, such as baseline, fire, tornado, or stress."),
+                ("Challenge", "The exact scenario pattern used in this run."),
+                ("Nodes", "How many nodes were started for the run."),
+                ("Run", "The repetition number inside the suite."),
+                ("Seed", "The deterministic seed used to make paired comparisons fair."),
+                ("Active Time", "The measured scenario window that actually ran."),
+                ("Reachable", "How many nodes answered when evidence was collected."),
+                ("Total Nodes", "How many nodes were expected in the network."),
+                ("Events", "Logged scenario actions such as stage changes, faults, or resets."),
+                ("Detection Speed", "Seconds until the LOCAL watch first shows a hazard signal."),
+                ("First Watch / First Impact / Outage / Recovery / Reset", "The key timeline milestones pulled into the run timeline strip."),
+                ("TX Fail / TX Timeout / Conn Err", "Send-side problems seen during the run."),
+                ("Status", "Overall outcome, usually OK, WARN, or FAIL."),
+            ],
+        ),
+        (
+            "Message Flow",
+            [
+                ("Accepted Msgs", "Messages the protocol accepted into node state or processing."),
+                ("Pull RX", "Pull requests this node received and answered."),
+                ("Pull TX", "Pull requests this node sent to other nodes."),
+                ("Push RX", "Protocol push messages this node received."),
+                ("Push TX", "Protocol push messages this node sent."),
+            ],
+        ),
+        (
+            "Traffic And Overhead",
+            [
+                ("RX Bytes", "Total bytes received by the node."),
+                ("TX Bytes", "Total bytes sent by the node."),
+                ("Bytes", "RX Bytes plus TX Bytes."),
+                ("MB", "Bytes converted to megabytes for paper-friendly reading."),
+            ],
+        ),
+        (
+            "Residual Quality",
+            [
+                ("False Positive Nodes", "Nodes that still look non-normal at the end of the run when they should have settled."),
+                ("False Unavailable Refs", "Neighbor references that still look unavailable even though evidence collection reached the full network."),
+                ("Settle Accuracy", "A paper-friendly final-state accuracy proxy computed from how many nodes returned to normal."),
+            ],
+        ),
+        (
+            "State And Faults",
+            [
+                ("State", "The node's current protocol state."),
+                ("Boundary Kind", "The local boundary interpretation, such as stable or front."),
+                ("Phase", "The current sensing phase, such as CLEAR or impact-related states."),
+                ("Direction", "The inferred hazard direction when the protocol supports it."),
+                ("Missing", "How many neighbors are currently missing or marked unavailable."),
+                ("Crash Sim", "An injected false-unavailability fault."),
+                ("Lie Sensor", "An injected misleading sensor-reading fault."),
+                ("Flap", "An injected on-off or unstable behavior fault."),
+                ("Error", "The last reporting or pull error captured for that node."),
+            ],
+        ),
+    ]
+
+    cards = []
+    for title, items in groups:
+        bullets = "".join(
+            '<li><strong>{}</strong>: {}</li>'.format(escape(name), escape(desc))
+            for name, desc in items
+        )
+        cards.append(
+            """<div class="guide-list-card">
+  <h3>{}</h3>
+  <ul class="guide-list">{}</ul>
+</div>""".format(escape(title), bullets)
+        )
+
+    return """<section class="panel">
+<div class="panel-head">
+  <h2>Field Reference</h2>
+  <p class="section-note">This explains the main variables used in the run table, watched-node table, history charts, and all-node snapshot.</p>
+</div>
+<div class="guide-list-grid">{}</div>
+</section>""".format("".join(cards))
 
 
 def _render_glossary_html():
@@ -1589,7 +2621,7 @@ def _render_glossary_html():
         ),
         (
             "Resilience",
-            "Use reachable nodes, TX failures, TX timeouts, missing neighbors, and active fault flags to judge how well the protocol handles stress.",
+            "Use reachable nodes, TX failures, TX timeouts, missing neighbors, false-unavailable references, and active fault flags to judge how well the protocol handles stress.",
         ),
         (
             "Overhead",
@@ -1607,9 +2639,9 @@ def _render_glossary_html():
 
     guide_rows = [
         ("Speed", "active_duration_sec, accepted_messages, pull or push history", "Faster runs usually show earlier, steeper growth with fewer stalls."),
-        ("Resilience", "reachable_nodes, tx_fail_total, tx_timeout_total, current_missing_count", "More failures or missing neighbors usually means weaker fault tolerance."),
+        ("Resilience", "reachable_nodes, tx_fail_total, tx_timeout_total, current_missing_count, false_unavailable_refs", "More failures or missing neighbors usually means weaker fault tolerance."),
         ("Overhead", "total_mb, total_bytes, pull_rx or tx, push_rx or tx", "Lower MB with similar coverage is a stronger efficiency story."),
-        ("Accuracy", "phase, direction_label, boundary_kind, false-positive metrics when present", "Consistency and correct state interpretation support hazard sensing claims."),
+        ("Accuracy", "phase, direction_label, boundary_kind, false_positive_nodes, settle_accuracy_pct", "Consistency, correct state interpretation, and low residual alerts support stronger hazard sensing claims."),
         ("Correlation", "compare chart pairs like failures vs MB, accepted_messages vs push_rx", "Look for metrics rising or falling together, then confirm with scenario context."),
     ]
 
@@ -1632,6 +2664,147 @@ def _render_glossary_html():
   <tbody>{}</tbody>
 </table>
 </section>""".format(card_html, row_html)
+
+
+def _render_timeline_panel(timeline_rows):
+    if not timeline_rows:
+        return ""
+
+    items = []
+    for row in timeline_rows:
+        status = str(row.get("status", "")).strip().lower()
+        badge = "pill-soft"
+        if status == "observed":
+            badge = "pill-good"
+        elif status and status != "n/a":
+            badge = "pill-warn"
+        items.append(
+            """<div class="timeline-item">
+  <div class="timeline-dot"></div>
+  <div class="timeline-card">
+    <div class="timeline-top">
+      <h3>{milestone}</h3>
+      <span class="badge {badge}">{status}</span>
+    </div>
+    <div class="timeline-time">{time_value}</div>
+    <div class="timeline-detail">{detail}</div>
+  </div>
+</div>""".format(
+                milestone=escape(str(row.get("milestone", ""))),
+                badge=badge,
+                status=escape(str(row.get("status", "") or "n/a")),
+                time_value=escape(_format_display_value("time_sec", row.get("time_sec", "")) or "n/a"),
+                detail=escape(str(row.get("detail", "") or "No detail recorded")),
+            )
+        )
+
+    return """<section class="panel">
+<div class="panel-head">
+  <h2>True Event Timeline</h2>
+  <p class="section-note">This strip lines up the scenario milestones that matter most for speed and resilience: ignition, first watch, first impact, outage, recovery, and reset.</p>
+</div>
+<div class="timeline-strip">{items}</div>
+<div class="table-wrap" style="margin-top:14px;">
+  <table>
+    <thead><tr><th>Milestone</th><th>Time</th><th>Status</th><th>Detail</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</div>
+</section>""".format(
+        items="".join(items),
+        rows="".join(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+                escape(str(row.get("milestone", ""))),
+                escape(_format_display_value("time_sec", row.get("time_sec", "")) or "n/a"),
+                escape(str(row.get("status", "") or "n/a")),
+                escape(str(row.get("detail", "") or "")),
+            )
+            for row in timeline_rows
+        ),
+    )
+
+
+def _render_fire_semantics_panel(fire_stage_rows):
+    if not fire_stage_rows:
+        return ""
+    rows_html = "".join(
+        "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+            escape(str(row.get("stage", ""))),
+            escape(str(row.get("time_window", "") or "n/a")),
+            escape(str(row.get("affected_ports", "") or "n/a")),
+            escape(str(row.get("detail", "") or "")),
+        )
+        for row in fire_stage_rows
+    )
+    return """<section class="panel fire-panel">
+<div class="panel-head">
+  <h2>Fire Semantics</h2>
+  <p class="section-note">This run uses a spreading fire front with four paper-friendly stages: ignition, front expansion, bomb core, and recovery.</p>
+</div>
+<div class="guide-grid">
+  <div class="guide-card"><h3>Ignition</h3><p>The first center ignition point that starts the spread.</p></div>
+  <div class="guide-card"><h3>Front Expansion</h3><p>Hop-based outward rings that show how the fire front propagates through the topology.</p></div>
+  <div class="guide-card"><h3>Bomb Core</h3><p>A short, concentrated impact near the center that stresses sudden local unavailability.</p></div>
+  <div class="guide-card"><h3>Recovery</h3><p>Recovery waves and the final reset that should bring nodes back toward normal.</p></div>
+</div>
+<div class="table-wrap" style="margin-top:14px;">
+  <table>
+    <thead><tr><th>Stage</th><th>Time Window</th><th>Affected Ports</th><th>Detail</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</div>
+</section>""".format(rows=rows_html)
+
+
+def _render_spotlight_table_html(title, rows, fields, port_field, subtitle=""):
+    head = []
+    for field in fields:
+        head.append("<th>{}</th>".format(escape(_field_label(field))))
+
+    body = []
+    if rows:
+        for row in rows:
+            cells = []
+            for field in fields:
+                display = escape(_format_display_value(field, row.get(field, "")))
+                badge_class = _badge_class(field, row.get(field, ""))
+                if badge_class:
+                    display = '<span class="badge {}">{}</span>'.format(badge_class, display)
+                cells.append('<td class="{}">{}</td>'.format(_cell_class(field, row.get(field, "")), display))
+
+            row_classes = _row_class(row)
+            attrs = ""
+            port_value = _maybe_int(row.get(port_field, ""))
+            if port_value is not None:
+                row_classes = "{} spotlight-row-selectable".format(row_classes).strip()
+                attrs = ' data-spotlight-port="{port}" tabindex="0" role="button" aria-label="Select node {port} for spotlight"'.format(
+                    port=escape(str(port_value))
+                )
+            body.append('<tr class="{classes}"{attrs}>{cells}</tr>'.format(classes=row_classes, attrs=attrs, cells="".join(cells)))
+    else:
+        body.append('<tr><td colspan="{}" class="empty">No rows recorded.</td></tr>'.format(len(fields)))
+
+    subtitle_html = ""
+    if subtitle:
+        subtitle_html = '<p class="section-note">{}</p>'.format(escape(subtitle))
+
+    return """<section class="panel">
+<div class="panel-head">
+  <h2>{title}</h2>
+  {subtitle}
+</div>
+<div class="table-wrap">
+  <table>
+    <thead><tr>{head}</tr></thead>
+    <tbody>{body}</tbody>
+  </table>
+</div>
+</section>""".format(
+        title=escape(title),
+        subtitle=subtitle_html,
+        head="".join(head),
+        body="".join(body),
+    )
 
 
 def _read_tsv_rows(path):
@@ -1677,7 +2850,7 @@ def _scenario_label(phase_id, challenge):
 
 def _scenario_sort_key(signature):
     phase_id, challenge = signature
-    phase_order = {"phase1": 1, "phase2": 2, "phase3": 3}
+    phase_order = {"phase1": 1, "phase2": 2, "phase3": 3, "phase4": 4}
     return (phase_order.get(str(phase_id), 99), _scenario_label(phase_id, challenge))
 
 
@@ -1698,25 +2871,7 @@ def _suite_setup_parts(rows):
 
 
 def _row_has_signal(row):
-    state = str(row.get("protocol_state", "")).strip().upper()
-    phase = str(row.get("phase", "")).strip().upper()
-    if state and state not in ("NORMAL", "STABLE"):
-        return True
-    if phase and phase not in ("", "CLEAR"):
-        return True
-    if _to_int(row.get("accepted_messages", 0), 0) > 0:
-        return True
-    if _to_int(row.get("pull_rx", 0), 0) > 0 or _to_int(row.get("push_rx", 0), 0) > 0:
-        return True
-    if _to_int(row.get("total_bytes", 0), 0) > 0:
-        return True
-    if _to_int(row.get("current_missing_count", 0), 0) > 0:
-        return True
-    for field in ("crash_sim", "lie_sensor", "flap"):
-        truthy = _boolish(row.get(field, ""))
-        if truthy:
-            return True
-    return False
+    return _history_row_has_hazard_signal(row)
 
 
 def _run_detection_speed_sec(repo_root, summary_row):
@@ -2122,13 +3277,219 @@ def _render_suite_interactive_panel(summary_rows):
     return panel_html, script_html
 
 
-def _render_node_spotlight_panel(evidence, history_rows):
-    node_payload = _node_spotlight_payload(evidence)
+def _average_for_rows(rows, field):
+    values = []
+    for row in rows:
+        number = _maybe_float(row.get(field))
+        if number is not None:
+            values.append(float(number))
+    if not values:
+        return None
+    return float(statistics.mean(values))
+
+
+def _render_nodecount_delta_html(field, current_value, reference_value):
+    if current_value is None or reference_value is None:
+        return '<span class="delta-chip delta-flat">n/a</span>'
+    delta = float(current_value) - float(reference_value)
+    if abs(delta) < 1e-12:
+        return '<span class="delta-chip delta-flat">{}</span>'.format(escape(_format_display_value(field, 0)))
+
+    display = _format_display_value(field, delta)
+    delta_class = "delta-down"
+    if delta > 0:
+        display = "+{}".format(display)
+        delta_class = "delta-up"
+
+    pct_html = ""
+    if abs(float(reference_value)) >= 1e-12:
+        pct_html = '<span class="delta-subnote">({:+.1f}%)</span>'.format((delta / float(reference_value)) * 100.0)
+    return '<span class="delta-chip {delta_class}">{display}</span>{pct_html}'.format(
+        delta_class=delta_class,
+        display=escape(display),
+        pct_html=pct_html,
+    )
+
+
+def _render_nodecount_compare_table(summary_rows, node_counts, selected_count):
+    by_nodes = {
+        int(count): [row for row in summary_rows if _to_int(row.get("nodes", 0), 0) == int(count)]
+        for count in node_counts
+    }
+    baseline_count = int(node_counts[0]) if node_counts else None
+    previous_counts = [int(count) for count in node_counts if int(count) < int(selected_count)]
+    previous_count = previous_counts[-1] if previous_counts else None
+
+    head = ["<th>Metric</th>"]
+    for count in node_counts:
+        classes = ["col-nodes"]
+        if int(count) == int(selected_count):
+            classes.append("compare-current")
+        head.append('<th class="{classes}">{label}</th>'.format(classes=" ".join(classes), label=escape("{} Nodes".format(int(count)))))
+    head.append("<th>{}</th>".format(escape("Δ vs {}".format(previous_count) if previous_count is not None else "Δ vs Smaller")))
+    head.append("<th>{}</th>".format(escape("Δ vs {}".format(baseline_count) if baseline_count is not None else "Δ vs First")))
+
+    body = []
+    for field in NODECOUNT_COMPARE_FIELDS:
+        cells = ['<td class="metric-ink"><strong>{}</strong></td>'.format(escape(_field_label(field)))]
+        current_value = _average_for_rows(by_nodes.get(int(selected_count), []), field)
+        previous_value = _average_for_rows(by_nodes.get(int(previous_count), []), field) if previous_count is not None else None
+        baseline_value = _average_for_rows(by_nodes.get(int(baseline_count), []), field) if baseline_count is not None else None
+
+        for count in node_counts:
+            value = _average_for_rows(by_nodes.get(int(count), []), field)
+            display = escape(_format_display_value(field, value if value is not None else ""))
+            classes = [_cell_class(field, value if value is not None else "")]
+            if int(count) == int(selected_count):
+                classes.append("compare-current")
+            cells.append('<td class="{classes}">{display}</td>'.format(classes=" ".join(filter(None, classes)), display=display))
+
+        cells.append('<td class="metric-ink">{}</td>'.format(_render_nodecount_delta_html(field, current_value, previous_value)))
+        if baseline_count is None or int(selected_count) == int(baseline_count):
+            cells.append('<td class="metric-ink"><span class="delta-chip delta-flat">n/a</span></td>')
+        else:
+            cells.append('<td class="metric-ink">{}</td>'.format(_render_nodecount_delta_html(field, current_value, baseline_value)))
+        body.append("<tr>{}</tr>".format("".join(cells)))
+
+    return """<section class="panel">
+<div class="panel-head">
+  <h2>Node Count Comparison</h2>
+  <p class="section-note">The selected node count is highlighted. Plus means the metric increased from the reference size and minus means it decreased.</p>
+</div>
+<div class="table-wrap">
+  <table>
+    <thead><tr>{head}</tr></thead>
+    <tbody>{body}</tbody>
+  </table>
+</div>
+</section>""".format(head="".join(head), body="".join(body))
+
+
+def _render_nodecount_panel(summary_rows, watch_rows):
+    node_counts = sorted({int(_to_int(row.get("nodes", 0), 0)) for row in summary_rows if _to_int(row.get("nodes", 0), 0) > 0})
+    if not node_counts:
+        return "", ""
+
+    button_html = []
+    panels_html = []
+    for idx, count in enumerate(node_counts):
+        subset = sorted(
+            [row for row in summary_rows if _to_int(row.get("nodes", 0), 0) == int(count)],
+            key=lambda item: _to_int(item.get("run_index", 0), 0),
+        )
+        watch_subset = sorted(
+            [row for row in watch_rows if _to_int(row.get("nodes", 0), 0) == int(count)],
+            key=lambda item: (_to_int(item.get("run_index", 0), 0), str(item.get("view", ""))),
+        )
+        button_html.append(
+            '<button type="button" class="scenario-tab{active}" data-nodecount-tab="{count}">{count} Nodes</button>'.format(
+                active=" active" if idx == 0 else "",
+                count=int(count),
+            )
+        )
+
+        avg_mb = _average_for_rows(subset, "total_mb")
+        avg_fail = _average_for_rows(subset, "tx_fail_total")
+        avg_timeout = _average_for_rows(subset, "tx_timeout_total")
+        avg_reachable = _average_for_rows(subset, "reachable_nodes")
+        avg_active = _average_for_rows(subset, "active_duration_sec")
+
+        panels_html.append(
+            """<div class="nodecount-panel{active}" data-nodecount-panel="{count}">
+{cards}
+{compare}
+{runs}
+{watches}
+</div>""".format(
+                active=" active" if idx == 0 else "",
+                count=int(count),
+                cards=_render_cards_html(
+                    [
+                        {
+                            "label": "Runs",
+                            "value": str(len(subset)),
+                            "note": "{} watch rows".format(len(watch_subset)),
+                            "tone": "accent",
+                        },
+                        {
+                            "label": "Avg Traffic",
+                            "value": _format_display_value("total_mb", avg_mb if avg_mb is not None else 0.0),
+                            "note": "average per {}-node run".format(int(count)),
+                            "tone": "accent",
+                        },
+                        {
+                            "label": "Avg Failures",
+                            "value": _format_display_value("tx_fail_total", avg_fail if avg_fail is not None else 0.0),
+                            "note": "{} avg timeouts".format(_format_display_value("tx_timeout_total", avg_timeout if avg_timeout is not None else 0.0)),
+                            "tone": "warn" if avg_fail and avg_fail > 0 else "good",
+                        },
+                        {
+                            "label": "Avg Reachable",
+                            "value": _format_display_value("reachable_nodes", avg_reachable if avg_reachable is not None else 0.0),
+                            "note": "{} active time".format(_format_display_value("active_duration_sec", avg_active if avg_active is not None else 0.0)),
+                            "tone": "accent",
+                        },
+                    ]
+                ),
+                compare=_render_nodecount_compare_table(summary_rows, node_counts, count),
+                runs=_render_table_html(
+                    "{}-Node Run Overview".format(int(count)),
+                    subset,
+                    RUN_OVERVIEW_FIELDS,
+                    "Only runs with {} nodes are shown here.".format(int(count)),
+                ),
+                watches=_render_table_html(
+                    "{}-Node Watched Nodes".format(int(count)),
+                    watch_subset,
+                    WATCH_OVERVIEW_FIELDS,
+                    "Only LOCAL and FAR watch rows from {}-node runs are shown here.".format(int(count)),
+                ),
+            )
+        )
+
+    panel_html = """<section class="panel">
+<div class="panel-head">
+  <h2>Compare 49 vs 64 vs 81</h2>
+  <p class="section-note">Pick a node-count tab to filter the run and watch tables below. The comparison table keeps signed plus/minus deltas so scaling changes are easy to see.</p>
+</div>
+<div class="scenario-tab-row">{buttons}</div>
+</section>
+{panels}""".format(buttons="".join(button_html), panels="".join(panels_html))
+
+    script_html = """<script>
+(() => {{
+  const buttons = Array.from(document.querySelectorAll('[data-nodecount-tab]'));
+  const panels = Array.from(document.querySelectorAll('[data-nodecount-panel]'));
+  if (!buttons.length || !panels.length) return;
+
+  function showTab(value) {{
+    buttons.forEach((button) => {{
+      button.classList.toggle('active', button.getAttribute('data-nodecount-tab') === value);
+    }});
+    panels.forEach((panel) => {{
+      panel.classList.toggle('active', panel.getAttribute('data-nodecount-panel') === value);
+    }});
+  }}
+
+  buttons.forEach((button) => {{
+    button.addEventListener('click', () => {{
+      showTab(button.getAttribute('data-nodecount-tab') || '');
+    }});
+  }});
+
+  showTab(buttons[0].getAttribute('data-nodecount-tab') || '');
+}})();
+</script>"""
+    return panel_html, script_html
+
+
+def _render_node_spotlight_panel(evidence, history_rows, watch_ports=None, node_logs=None):
+    node_payload = _node_spotlight_payload(evidence, watch_ports=watch_ports)
     if not node_payload:
         return "", ""
 
     options_html = "".join(
-        '<option value="{value}">{label}</option>'.format(value=escape(str(row["port"])), label=escape(str(row["port"])))
+        '<option value="{value}">{label}</option>'.format(value=escape(str(row["port"])), label=escape(str(row.get("summary_label", row["port"]))))
         for row in node_payload
     )
     metric_options_html = "".join(
@@ -2137,11 +3498,20 @@ def _render_node_spotlight_panel(evidence, history_rows):
     )
     node_json = escape(json.dumps(node_payload))
     history_json = escape(json.dumps(history_rows or []))
+    node_logs_json = escape(json.dumps(node_logs or {}))
 
     panel_html = """<section class="panel">
 <div class="panel-head">
   <h2>Node Spotlight</h2>
-  <p class="section-note">Pick any node to inspect pulls, requests, state, and recent messages.</p>
+  <p class="section-note">Pick any node, or click a row in the watched-node or all-node tables, to inspect its counters, history, and recent messages.</p>
+</div>
+<div class="spotlight-banner">
+  <div>
+    <div class="spotlight-banner-label">Selected Node</div>
+    <div id="spotlight-selected-title" class="spotlight-banner-title"></div>
+    <div id="spotlight-selected-subtitle" class="spotlight-banner-subtitle"></div>
+  </div>
+  <div id="spotlight-selected-tags" class="spotlight-chip-row"></div>
 </div>
 <div class="control-row">
   <div class="control-field">
@@ -2153,19 +3523,33 @@ def _render_node_spotlight_panel(evidence, history_rows):
     <select id="spotlight-metric-select">{}</select>
   </div>
 </div>
+<div class="spotlight-chip-row" style="margin-top:12px;">
+  <button type="button" class="jump-chip" data-spotlight-jump="LOCAL">Local Watch</button>
+  <button type="button" class="jump-chip" data-spotlight-jump="FAR">Far Watch</button>
+  <button type="button" class="jump-chip" data-spotlight-jump="BUSIEST">Busiest By Bytes</button>
+  <button type="button" class="jump-chip" data-spotlight-jump="QUIETEST">Quietest By Bytes</button>
+  <button type="button" class="jump-chip" data-spotlight-jump="MOST_MSGS">Most Accepted Msgs</button>
+</div>
 <div id="spotlight-cards" class="micro-grid"></div>
 <div class="spotlight-grid" style="margin-top:12px;">
   <div class="spotlight-card">
     <h3>Selected Node History</h3>
+    <div id="spotlight-point-detail" class="chart-detail">Hover or click a point to inspect its exact sample time and delta.</div>
     <div id="spotlight-chart"></div>
-    <p id="spotlight-history-note" class="micro-note"></p>
+    <p id="spotlight-history-note" class="micro-note">The selected point stays highlighted so you can compare it with the timestamped message activity beside it.</p>
   </div>
   <div class="spotlight-card">
-    <h3>Recent Messages</h3>
+    <h3>Recent Messages (Timestamped)</h3>
+    <p class="micro-note">Short in-memory message trail captured from the node state.</p>
     <ul id="spotlight-log" class="spotlight-log"></ul>
   </div>
 </div>
 <div class="spotlight-grid" style="margin-top:12px;">
+  <div class="spotlight-card">
+    <h3>Raw Node Log Tail</h3>
+    <p id="spotlight-log-context" class="micro-note accent-note">Click a chart point to compare that sample with the raw timestamped node log below.</p>
+    <pre id="spotlight-log-tail" class="spotlight-log-tail"></pre>
+  </div>
   <div class="spotlight-card">
     <h3>Extra Context</h3>
     <div id="spotlight-extra"></div>
@@ -2175,18 +3559,28 @@ def _render_node_spotlight_panel(evidence, history_rows):
 
     script_html = """<script type="application/json" id="spotlight-node-data">{node_json}</script>
 <script type="application/json" id="spotlight-history-data">{history_json}</script>
+<script type="application/json" id="spotlight-log-data">{node_logs_json}</script>
 <script>
 (() => {{
   const nodes = JSON.parse(document.getElementById('spotlight-node-data').textContent || '[]');
   const historyRows = JSON.parse(document.getElementById('spotlight-history-data').textContent || '[]');
+  const nodeLogs = JSON.parse(document.getElementById('spotlight-log-data').textContent || '{{}}');
   if (!nodes.length) return;
   const portSelect = document.getElementById('spotlight-port-select');
   const metricSelect = document.getElementById('spotlight-metric-select');
+  const titleHost = document.getElementById('spotlight-selected-title');
+  const subtitleHost = document.getElementById('spotlight-selected-subtitle');
+  const tagsHost = document.getElementById('spotlight-selected-tags');
   const cardsHost = document.getElementById('spotlight-cards');
+  const pointDetailHost = document.getElementById('spotlight-point-detail');
   const chartHost = document.getElementById('spotlight-chart');
   const noteHost = document.getElementById('spotlight-history-note');
   const logHost = document.getElementById('spotlight-log');
+  const logTailHost = document.getElementById('spotlight-log-tail');
+  const logContextHost = document.getElementById('spotlight-log-context');
   const extraHost = document.getElementById('spotlight-extra');
+  const jumpButtons = Array.from(document.querySelectorAll('[data-spotlight-jump]'));
+  const clickableRows = Array.from(document.querySelectorAll('[data-spotlight-port]'));
   const intFmt = new Intl.NumberFormat('en-US');
 
   function toNum(value) {{
@@ -2200,6 +3594,24 @@ def _render_node_spotlight_panel(evidence, history_rows):
     if (field.includes('bytes')) return intFmt.format(Math.round(value));
     if (Math.abs(value - Math.round(value)) < 1e-9) return intFmt.format(Math.round(value));
     return value.toFixed(3);
+  }}
+
+  function rankBy(field, port, descending = true) {{
+    const ordered = nodes
+      .slice()
+      .sort((a, b) => {{
+        const left = toNum(a[field]) || 0;
+        const right = toNum(b[field]) || 0;
+        return descending ? right - left : left - right;
+      }});
+    const idx = ordered.findIndex(item => String(item.port) === String(port));
+    return idx >= 0 ? idx + 1 : null;
+  }}
+
+  function averageOf(field) {{
+    const values = nodes.map(item => toNum(item[field])).filter(value => value !== null);
+    if (!values.length) return null;
+    return values.reduce((acc, value) => acc + value, 0) / values.length;
   }}
 
   function lineSvg(points, color) {{
@@ -2220,14 +3632,21 @@ def _render_node_spotlight_panel(evidence, history_rows):
       const x = points.length > 1 ? padX + idx * stepX : padX + usableW / 2;
       const ratio = (point.value - min) / (max - min);
       const y = padTop + (1 - ratio) * usableH;
-      return {{ x, y }};
+      const prev = idx > 0 ? points[idx - 1].value : null;
+      return {{ x, y, point, delta: prev === null ? null : point.value - prev }};
     }});
     const polyline = coords.map(point => `${{point.x.toFixed(2)}},${{point.y.toFixed(2)}}`).join(' ');
     const fillPoly = [`${{coords[0].x.toFixed(2)}},${{(height - padBottom).toFixed(2)}}`]
       .concat(coords.map(point => `${{point.x.toFixed(2)}},${{point.y.toFixed(2)}}`))
       .concat([`${{coords[coords.length - 1].x.toFixed(2)}},${{(height - padBottom).toFixed(2)}}`])
       .join(' ');
-    const circles = coords.map(point => `<circle cx="${{point.x.toFixed(2)}}" cy="${{point.y.toFixed(2)}}" r="2.8" fill="${{color}}"></circle>`).join('');
+    const circles = coords.map(point => {{
+      const deltaValue = point.delta === null ? '' : point.delta.toFixed(3);
+      const deltaDisplay = point.delta === null ? 'start' : `${{point.delta > 0 ? '+' : ''}}${{point.delta.toFixed(3)}}`;
+      return `<circle cx="${{point.x.toFixed(2)}}" cy="${{point.y.toFixed(2)}}" r="3.2" fill="${{color}}" class="chart-point" tabindex="0" data-label="${{point.point.label}}" data-value="${{point.point.value.toFixed(3)}}" data-delta="${{deltaValue}}" data-value-display="${{fmt(metricSelect.value || 'pull_rx', point.point.value)}}" data-delta-display="${{deltaDisplay}}"><title>${{point.point.label}} | ${{
+fmt(metricSelect.value || 'pull_rx', point.point.value)
+}} | delta ${{deltaDisplay}}</title></circle>`;
+    }}).join('');
     return `<svg viewBox="0 0 ${{width}} ${{height}}" class="metric-chart" role="img" aria-label="metric chart">
       <line x1="${{padX}}" y1="${{height - padBottom}}" x2="${{width - padX}}" y2="${{height - padBottom}}" class="chart-axis"></line>
       <line x1="${{padX}}" y1="${{padTop}}" x2="${{padX}}" y2="${{height - padBottom}}" class="chart-axis"></line>
@@ -2237,34 +3656,101 @@ def _render_node_spotlight_panel(evidence, history_rows):
     </svg>`;
   }}
 
+  function bindChartDetail() {{
+    const points = Array.from(chartHost.querySelectorAll('.chart-point'));
+    if (!points.length) {{
+      pointDetailHost.textContent = 'No sampled history exists for this node in this run.';
+      if (logContextHost) {{
+        logContextHost.textContent = 'Raw node log is still shown below, but this run did not capture sampled history for the selected node.';
+      }}
+      return;
+    }}
+    const update = (point) => {{
+      points.forEach((item) => item.classList.toggle('is-active', item === point));
+      const label = point.getAttribute('data-label') || '';
+      const value = point.getAttribute('data-value-display') || point.getAttribute('data-value') || '';
+      const delta = point.getAttribute('data-delta-display') || 'n/a';
+      pointDetailHost.innerHTML = `<strong>${{label}}</strong> · value ${{value}} · delta ${{delta}}`;
+      if (logContextHost) {{
+        logContextHost.textContent = `Selected sample ${{label}}. Compare this chart point with the raw timestamped node log below.`;
+      }}
+    }};
+    points.forEach((point) => {{
+      point.addEventListener('mouseenter', () => update(point));
+      point.addEventListener('focus', () => update(point));
+      point.addEventListener('click', () => update(point));
+    }});
+    update(points[points.length - 1]);
+  }}
+
+  function setSelectedPort(port) {{
+    if (!port) return;
+    portSelect.value = String(port);
+    render();
+  }}
+
   function render() {{
-    const port = String(portSelect.value || nodes[0].port);
+    const fallbackNode = nodes.find(item => String(item.watch_role) === 'LOCAL') || nodes[0];
+    const port = String(portSelect.value || fallbackNode.port);
     const metric = metricSelect.value || 'pull_rx';
     const node = nodes.find(item => String(item.port) === port) || nodes[0];
     const history = historyRows
       .filter(item => String(item.port) === port)
+      .sort((a, b) => (toNum(a.sample_index) || 0) - (toNum(b.sample_index) || 0))
       .map(item => ({{ label: String(item.sample_label || ''), value: toNum(item[metric]) }}))
       .filter(item => item.value !== null);
+    const nodeLogLines = Array.isArray(nodeLogs[port]) ? nodeLogs[port] : [];
+    const avgBytes = averageOf('total_bytes');
+    const avgAccepted = averageOf('accepted_messages');
+    const bytesRank = rankBy('total_bytes', port, true);
+    const acceptedRank = rankBy('accepted_messages', port, true);
+    const watchRole = String(node.watch_role || '').trim();
+    const roleText = watchRole ? `${{watchRole}} watch` : 'Regular node';
+    const sampleCount = history.length;
+    const historyLatest = history.length ? history[history.length - 1].value : null;
+    const tags = [
+      watchRole ? `${{watchRole}} WATCH` : 'REGULAR',
+      node.reachable ? 'REACHABLE' : 'UNREACHABLE',
+      `Traffic rank #${{bytesRank || 'n/a'}}`,
+      `Msg rank #${{acceptedRank || 'n/a'}}`,
+    ];
+
+    titleHost.textContent = `Port ${{port}}`;
+    subtitleHost.textContent = `${{roleText}} · ${{node.protocol_state || 'UNKNOWN'}} · ${{fmt('total_mb', toNum(node.total_mb))}} traffic · ${{sampleCount}} history samples`;
+    tagsHost.innerHTML = tags.map(tag => `<span class="badge pill-soft">${{tag}}</span>`).join('');
 
     const cards = [
+      {{ label: 'Role', value: watchRole || 'REGULAR', note: watchRole ? 'watched node in the paper report' : 'ordinary node' }},
       {{ label: 'State', value: node.protocol_state || 'UNKNOWN', note: node.boundary_kind || 'no boundary label' }},
+      {{ label: 'Traffic Rank', value: bytesRank ? `#${{bytesRank}} / ${{nodes.length}}` : 'n/a', note: 'ranked by total bytes among all nodes' }},
+      {{ label: 'Accepted Rank', value: acceptedRank ? `#${{acceptedRank}} / ${{nodes.length}}` : 'n/a', note: 'ranked by accepted messages among all nodes' }},
+      {{ label: 'Traffic', value: fmt('total_mb', toNum(node.total_mb)), note: fmt('total_bytes', toNum(node.total_bytes)) + ' total bytes' }},
+      {{ label: 'Vs Avg Traffic', value: avgBytes === null ? 'n/a' : fmt('total_bytes', (toNum(node.total_bytes) || 0) - avgBytes), note: 'difference from network average bytes' }},
+      {{ label: 'Accepted Msgs', value: fmt('accepted_messages', toNum(node.accepted_messages)), note: avgAccepted === null ? 'messages accepted by the node' : `network avg ${{
+fmt('accepted_messages', avgAccepted)
+}}` }},
       {{ label: 'Pull RX', value: fmt('pull_rx', toNum(node.pull_rx)), note: 'inbound pull requests served' }},
       {{ label: 'Pull TX', value: fmt('pull_tx', toNum(node.pull_tx)), note: 'outbound pull requests sent' }},
       {{ label: 'Push RX', value: fmt('push_rx', toNum(node.push_rx)), note: 'protocol push messages received' }},
       {{ label: 'Push TX', value: fmt('push_tx', toNum(node.push_tx)), note: 'protocol push messages sent' }},
-      {{ label: 'Traffic', value: fmt('total_mb', toNum(node.total_mb)), note: fmt('total_bytes', toNum(node.total_bytes)) + ' total bytes' }},
-      {{ label: 'Accepted Msgs', value: fmt('accepted_messages', toNum(node.accepted_messages)), note: 'messages accepted by the node' }},
       {{ label: 'Missing Neighbors', value: fmt('current_missing_count', toNum(node.current_missing_count)), note: 'current missing-neighbor count' }},
     ];
     cardsHost.innerHTML = cards.map(card => `<div class="micro-card"><div class="micro-label">${{card.label}}</div><div class="micro-value">${{card.value}}</div><div class="micro-note">${{card.note}}</div></div>`).join('');
 
     chartHost.innerHTML = lineSvg(history, '#118a7e');
+    bindChartDetail();
     noteHost.textContent = history.length
-      ? `Tracking ${{metric.replaceAll('_', ' ')}} for port ${{port}} across sampled pull history.`
+      ? `Tracking ${{metric.replaceAll('_', ' ')}} for port ${{port}} across sampled pull history. Latest value: ${{fmt(metric, historyLatest)}}.`
       : 'No sampled history exists for this node in this run. New runs after the history patch will fill this in.';
 
     const recentMsgs = Array.isArray(node.recent_msgs) && node.recent_msgs.length ? node.recent_msgs : ['No recent messages captured.'];
     logHost.innerHTML = recentMsgs.map(item => `<li>${{item}}</li>`).join('');
+    logTailHost.textContent = nodeLogLines.length
+      ? nodeLogLines.join('\\n')
+      : 'No raw node log was captured for this node in this run.';
+    if (!history.length && logContextHost) {{
+      logContextHost.textContent = `Showing the raw node log tail for port ${{port}}. This run did not capture sampled history for the selected node.`;
+    }}
     extraHost.innerHTML = `
       <div class="micro-grid">
         <div class="micro-card"><div class="micro-label">Phase</div><div class="micro-value">${{node.phase || 'n/a'}}</div><div class="micro-note">layer-2 phase or check-in phase</div></div>
@@ -2276,26 +3762,61 @@ def _render_node_spotlight_panel(evidence, history_rows):
       </div>
       <p class="micro-note" style="margin-top:12px;">Recent alerts: ${{Array.isArray(node.recent_alerts) && node.recent_alerts.length ? node.recent_alerts.join(', ') : 'none captured'}}</p>
     `;
+
+    clickableRows.forEach((row) => {{
+      row.classList.toggle('row-selected', String(row.getAttribute('data-spotlight-port') || '') === port);
+    }});
   }}
+
+  jumpButtons.forEach((button) => {{
+    const kind = button.getAttribute('data-spotlight-jump') || '';
+    let target = null;
+    if (kind === 'LOCAL') target = (nodes.find(item => String(item.watch_role) === 'LOCAL') || {{}}).port;
+    if (kind === 'FAR') target = (nodes.find(item => String(item.watch_role) === 'FAR') || {{}}).port;
+    if (kind === 'BUSIEST') target = (nodes.slice().sort((a, b) => (toNum(b.total_bytes) || 0) - (toNum(a.total_bytes) || 0))[0] || {{}}).port;
+    if (kind === 'QUIETEST') target = (nodes.slice().sort((a, b) => (toNum(a.total_bytes) || 0) - (toNum(b.total_bytes) || 0))[0] || {{}}).port;
+    if (kind === 'MOST_MSGS') target = (nodes.slice().sort((a, b) => (toNum(b.accepted_messages) || 0) - (toNum(a.accepted_messages) || 0))[0] || {{}}).port;
+    if (!target) {{
+      button.disabled = true;
+      return;
+    }}
+    button.addEventListener('click', () => setSelectedPort(target));
+  }});
+
+  clickableRows.forEach((row) => {{
+    row.addEventListener('click', () => setSelectedPort(row.getAttribute('data-spotlight-port')));
+    row.addEventListener('keydown', (event) => {{
+      if (event.key === 'Enter' || event.key === ' ') {{
+        event.preventDefault();
+        setSelectedPort(row.getAttribute('data-spotlight-port'));
+      }}
+    }});
+  }});
 
   portSelect.addEventListener('change', render);
   metricSelect.addEventListener('change', render);
+  const defaultNode = nodes.find(item => String(item.watch_role) === 'LOCAL') || nodes[0];
+  portSelect.value = String(defaultNode.port);
   render();
 }})();
-</script>""".format(node_json=node_json, history_json=history_json)
+</script>""".format(node_json=node_json, history_json=history_json, node_logs_json=node_logs_json)
     return panel_html, script_html
 
 
-def _write_run_html(run_dir, manifest, summary_row, watch_rows, evidence, events_path, history_rows=None, history_totals_rows=None):
+def _write_run_html(run_dir, manifest, summary_row, watch_rows, evidence, events_path, history_rows=None, history_totals_rows=None, timeline_rows=None, fire_stage_rows=None, figure_links=None):
     history_rows = history_rows or []
     history_totals_rows = history_totals_rows or []
+    timeline_rows = timeline_rows or []
+    fire_stage_rows = fire_stage_rows or []
+    figure_links = figure_links or []
     node_rows = _all_node_rows(evidence)
+    node_logs = _node_log_tails(run_dir, [row.get("port") for row in node_rows], max_lines=36)
     watch_ports = manifest.get("watch_ports", {})
     local_port = int(watch_ports.get("LOCAL", 0)) if watch_ports.get("LOCAL") is not None else None
     far_port = int(watch_ports.get("FAR", 0)) if watch_ports.get("FAR") is not None else None
     local_history = [row for row in history_rows if local_port is not None and _to_int(row.get("port", -1), -1) == int(local_port)]
     far_history = [row for row in history_rows if far_port is not None and _to_int(row.get("port", -1), -1) == int(far_port)]
-    spotlight_html, spotlight_script = _render_node_spotlight_panel(evidence, history_rows)
+    spotlight_html, spotlight_script = _render_node_spotlight_panel(evidence, history_rows, watch_ports=watch_ports, node_logs=node_logs)
 
     cards = [
         {
@@ -2317,6 +3838,12 @@ def _write_run_html(run_dir, manifest, summary_row, watch_rows, evidence, events
             "tone": "accent",
         },
         {
+            "label": "Detection",
+            "value": _format_display_value("detection_speed_sec", summary_row.get("detection_speed_sec", "")) or "n/a",
+            "note": "LOCAL watch first saw the scenario here",
+            "tone": "accent" if _maybe_float(summary_row.get("detection_speed_sec")) is not None else "warn",
+        },
+        {
             "label": "Failures",
             "value": _format_display_value("tx_fail_total", summary_row.get("tx_fail_total", 0)),
             "note": "{} timeouts, {} conn errors".format(
@@ -2325,12 +3852,24 @@ def _write_run_html(run_dir, manifest, summary_row, watch_rows, evidence, events
             ),
             "tone": "bad" if _maybe_float(summary_row.get("tx_fail_total", 0)) else "good",
         },
+        {
+            "label": "Residual Risk",
+            "value": "{} / {}".format(
+                _format_display_value("false_positive_nodes", summary_row.get("false_positive_nodes", 0)),
+                _format_display_value("false_unavailable_refs", summary_row.get("false_unavailable_refs", 0)),
+            ),
+            "note": "false positives / false unavailable refs",
+            "tone": "bad" if _to_int(summary_row.get("false_positive_nodes", 0), 0) or _to_int(summary_row.get("false_unavailable_refs", 0), 0) else "good",
+        },
     ]
 
     sections = [
         _render_glossary_html(),
+        _render_field_reference_html(),
+        _render_timeline_panel(timeline_rows),
+        _render_fire_semantics_panel(fire_stage_rows),
         _render_table_html("Run Overview", [summary_row], RUN_OVERVIEW_FIELDS, "Color badges make the health signals easier to spot at a glance."),
-        _render_table_html("Watched Nodes", watch_rows, WATCH_OVERVIEW_FIELDS, "Local rows are warm-toned, far rows are cool-toned."),
+        _render_spotlight_table_html("Watched Nodes", watch_rows, WATCH_OVERVIEW_FIELDS, "watch_port", "Local rows are warm-toned, far rows are cool-toned. Click a row to sync Node Spotlight."),
         spotlight_html,
         _render_chart_grid_html(
             "Pull History",
@@ -2353,7 +3892,7 @@ def _write_run_html(run_dir, manifest, summary_row, watch_rows, evidence, events
             _sample_label,
             "This follows the far watch node over time.",
         ),
-        _render_table_html("All Nodes Snapshot", node_rows, NODE_FIELDS, "Every node at the end of the run, so you can spot hotspots and outliers quickly."),
+        _render_spotlight_table_html("All Nodes Snapshot", node_rows, NODE_FIELDS, "port", "Every node at the end of the run, so you can spot hotspots and outliers quickly. Click any row to inspect it above."),
         _render_links_html(
             "Raw Files",
             [
@@ -2362,11 +3901,23 @@ def _write_run_html(run_dir, manifest, summary_row, watch_rows, evidence, events
                 ("paper_all_nodes.tsv", "paper_all_nodes.tsv"),
                 ("paper_pull_history.tsv", "paper_pull_history.tsv"),
                 ("paper_pull_totals.tsv", "paper_pull_totals.tsv"),
+                ("paper_timeline.tsv", "paper_timeline.tsv"),
+                ("paper_fire_stages.tsv", "paper_fire_stages.tsv"),
                 ("paper_summary.md", "paper_summary.md"),
                 ("paper_manifest.json", "paper_manifest.json"),
                 ("paper_evidence.json", "paper_evidence.json"),
                 (Path(events_path).name, Path(events_path).name),
-            ],
+            ] + figure_links,
+        ),
+        "<details><summary>Show Timeline Table</summary>{}</details>".format(
+            _render_table_html("Timeline", timeline_rows, TIMELINE_FIELDS)
+        ),
+        (
+            "<details><summary>Show Fire Stage Table</summary>{}</details>".format(
+                _render_table_html("Fire Stages", fire_stage_rows, FIRE_STAGE_FIELDS)
+            )
+            if fire_stage_rows
+            else ""
         ),
         "<details><summary>Show Pull Totals Table</summary>{}</details>".format(
             _render_table_html("Pull Totals Over Time", history_totals_rows, HISTORY_TOTAL_FIELDS)
@@ -2391,13 +3942,17 @@ def _write_run_html(run_dir, manifest, summary_row, watch_rows, evidence, events
     _write_text(run_dir / "paper_summary.html", _html_page("Paper Evaluation Run", subtitle, _render_cards_html(cards), "".join(sections), script_html=spotlight_script))
 
 
-def _write_suite_html(report_dir, spec, summary_rows, watch_rows, summary_by_nodes_rows):
+def _write_suite_html(report_dir, spec, summary_rows, watch_rows, summary_by_nodes_rows, figure_links=None):
+    figure_links = figure_links or []
     total_runs = len(summary_rows)
     total_mb_values = [float(row.get("total_mb", 0.0)) for row in summary_rows]
     total_failures = sum(int(row.get("tx_fail_total", 0)) for row in summary_rows)
     ok_runs = sum(1 for row in summary_rows if str(row.get("status", "")).strip().lower() == "ok")
+    accuracy_values = [_maybe_float(row.get("settle_accuracy_pct")) for row in summary_rows]
+    accuracy_values = [float(value) for value in accuracy_values if value is not None]
     summary_metric_rows = _metric_summary_rows(summary_rows, SUMMARY_CHART_FIELDS)
     interactive_html, interactive_script = _render_suite_interactive_panel(summary_rows)
+    nodecount_html, nodecount_script = _render_nodecount_panel(summary_rows, watch_rows)
     comparison_rows = _build_protocol_comparison_rows()
     comparison_html, comparison_script = _render_comparison_panel(comparison_rows)
     cards = [
@@ -2425,11 +3980,19 @@ def _write_suite_html(report_dir, spec, summary_rows, watch_rows, summary_by_nod
             "note": "{} TX failures".format(total_failures),
             "tone": "good" if total_failures == 0 else "warn",
         },
+        {
+            "label": "Settle Accuracy",
+            "value": "{:.1f}%".format(statistics.mean(accuracy_values)) if accuracy_values else "n/a",
+            "note": "final normal-state accuracy across runs",
+            "tone": "good" if accuracy_values and statistics.mean(accuracy_values) >= 95.0 else "warn",
+        },
     ]
 
     sections = [
         _render_glossary_html(),
+        _render_field_reference_html(),
         interactive_html,
+        nodecount_html,
         comparison_html,
         _render_run_deep_dive_html(report_dir, summary_rows),
         _render_table_html("Run Overview", summary_rows, RUN_OVERVIEW_FIELDS, "This is the quickest table to compare one run against another."),
@@ -2452,7 +4015,7 @@ def _write_suite_html(report_dir, spec, summary_rows, watch_rows, summary_by_nod
                 ("metric_averages.tsv", "metric_averages.tsv"),
                 ("protocol_comparison.tsv", "protocol_comparison.tsv"),
                 ("README.md", "README.md"),
-            ],
+            ] + figure_links,
         ),
         "<details><summary>Show Full Run Table</summary>{}</details>".format(
             _render_table_html("All Run Fields", summary_rows, SUMMARY_FIELDS)
@@ -2474,7 +4037,7 @@ def _write_suite_html(report_dir, spec, summary_rows, watch_rows, summary_by_nod
             subtitle,
             _render_cards_html(cards),
             "".join(sections),
-            script_html=(interactive_script + comparison_script),
+            script_html=(interactive_script + nodecount_script + comparison_script),
         ),
     )
 
@@ -2561,6 +4124,106 @@ def _tornado_sweep_batches(base_port, number_of_nodes, seed, width):
 def _baseline_actions(spec, base_port, number_of_nodes, seed):
     del spec, base_port, number_of_nodes, seed
     return []
+
+
+def _fire_ignition_port(base_port, number_of_nodes):
+    return _center_port(base_port, number_of_nodes)
+
+
+def _fire_core_ports(base_port, number_of_nodes):
+    ignition = _fire_ignition_port(base_port, number_of_nodes)
+    core = [int(ignition)]
+    for neighbor in _neighbors_for_port(base_port, number_of_nodes, ignition):
+        if int(neighbor) not in core:
+            core.append(int(neighbor))
+        if len(core) >= 3:
+            break
+    return sorted(core)
+
+
+def _fire_spread_batches(base_port, number_of_nodes):
+    ignition = _fire_ignition_port(base_port, number_of_nodes)
+    visited = {int(ignition)}
+    frontier = [int(ignition)]
+    layers = []
+
+    while frontier:
+        layers.append(sorted(int(port) for port in frontier))
+        next_frontier = []
+        for port in frontier:
+            for neighbor in _neighbors_for_port(base_port, number_of_nodes, port):
+                if int(neighbor) in visited:
+                    continue
+                visited.add(int(neighbor))
+                next_frontier.append(int(neighbor))
+        frontier = sorted(set(next_frontier))
+
+    return layers
+
+
+def _fire_actions(spec, base_port, number_of_nodes, seed):
+    del seed
+    duration_sec = _to_float(spec.get("duration_sec", 60), 60.0)
+    spread_batches = _fire_spread_batches(base_port, number_of_nodes)
+    core_ports = _fire_core_ports(base_port, number_of_nodes)
+    if len(spread_batches) == 0:
+        return []
+    spread_start = max(2.0, float(duration_sec) * 0.08)
+    spread_window = max(6.0, float(duration_sec) * 0.56)
+    step_gap = spread_window / max(1, len(spread_batches) - 1) if len(spread_batches) > 1 else spread_window
+    recovery_lag = max(step_gap * 1.6, float(duration_sec) * 0.14)
+    impacted_ports = sorted({int(port) for batch in spread_batches for port in batch} | {int(port) for port in core_ports})
+    actions = []
+
+    for idx, ports in enumerate(spread_batches):
+        fire_at = round(spread_start + (idx * step_gap), 3)
+        actions.append(
+            {
+                "at_sec": fire_at,
+                "kind": "state_batch",
+                "ports": [int(port) for port in ports],
+                "sensor_state": "ALERT",
+                "label": "fire_front_step_{}".format(idx + 1),
+            }
+        )
+        recover_at = spread_start + (idx * step_gap) + recovery_lag
+        if recover_at < float(duration_sec) * 0.90:
+            actions.append(
+                {
+                    "at_sec": round(recover_at, 3),
+                    "kind": "state_batch",
+                    "ports": [int(port) for port in ports],
+                    "sensor_state": "RECOVERING",
+                    "label": "fire_recover_step_{}".format(idx + 1),
+                }
+            )
+
+    bomb_at = min(float(duration_sec) * 0.58, spread_start + (step_gap * max(1, min(2, len(spread_batches) - 1))))
+    bomb_recover_at = min(float(duration_sec) * 0.82, bomb_at + max(3.0, step_gap * 1.5))
+    reset_at = min(float(duration_sec) - 0.2, max(bomb_recover_at + 1.0, float(duration_sec) * 0.95))
+    actions.extend(
+        [
+            {
+                "at_sec": round(bomb_at, 3),
+                "kind": "crash_batch",
+                "ports": [int(port) for port in core_ports],
+                "label": "bomb_core_impact",
+            },
+            {
+                "at_sec": round(bomb_recover_at, 3),
+                "kind": "recover_batch",
+                "ports": [int(port) for port in core_ports],
+                "label": "bomb_core_recover",
+            },
+            {
+                "at_sec": round(reset_at, 3),
+                "kind": "reset_batch",
+                "ports": impacted_ports,
+                "label": "fire_reset",
+            },
+        ]
+    )
+    return actions
 
 
 def _tornado_actions(spec, base_port, number_of_nodes, seed):
@@ -2691,6 +4354,8 @@ def _scenario_actions(spec, base_port, number_of_nodes, seed):
     kind = str(spec.get("scenario", {}).get("kind", "baseline")).strip().lower()
     if kind == "baseline":
         return _baseline_actions(spec, base_port, number_of_nodes, seed)
+    if kind == "firebomb":
+        return _fire_actions(spec, base_port, number_of_nodes, seed)
     if kind == "tornado_sweep":
         return _tornado_actions(spec, base_port, number_of_nodes, seed)
     if kind == "ghost_outage_noise":
@@ -2700,7 +4365,9 @@ def _scenario_actions(spec, base_port, number_of_nodes, seed):
 
 def _watch_ports(spec, base_port, number_of_nodes, seed):
     kind = str(spec.get("scenario", {}).get("kind", "baseline")).strip().lower()
-    if kind == "tornado_sweep":
+    if kind == "firebomb":
+        local_watch = _fire_ignition_port(base_port, number_of_nodes)
+    elif kind == "tornado_sweep":
         batches = _tornado_sweep_batches(base_port, number_of_nodes, seed, spec.get("scenario", {}).get("tornado_width", 2))
         local_watch = int(batches[0][0]) if len(batches) > 0 and len(batches[0]) > 0 else _center_port(base_port, number_of_nodes)
     elif kind == "ghost_outage_noise":
@@ -2720,27 +4387,28 @@ def _watch_ports(spec, base_port, number_of_nodes, seed):
 def _apply_action(action, events_path):
     kind = str(action.get("kind", ""))
     label = str(action.get("label", kind))
+    at_sec = round(_to_float(action.get("at_sec", 0.0), 0.0), 3)
 
     if kind == "crash_batch":
         for port in action.get("ports", []):
             res = _inject_fault(port, "crash_sim", True, period_sec=action.get("period_sec", 4))
-            _log_event(events_path, "fault", {"label": label, "port": int(port), "fault": "crash_sim", "enable": True, "response": res})
+            _log_event(events_path, "fault", {"label": label, "port": int(port), "fault": "crash_sim", "enable": True, "response": res, "at_sec": at_sec})
         return
 
     if kind == "recover_batch":
         for port in action.get("ports", []):
             res_fault = _inject_fault(port, "crash_sim", False, period_sec=action.get("period_sec", 4))
             res_state = _inject_state(port, "RECOVERING")
-            _log_event(events_path, "fault", {"label": label, "port": int(port), "fault": "crash_sim", "enable": False, "response": res_fault})
-            _log_event(events_path, "state", {"label": label, "port": int(port), "sensor_state": "RECOVERING", "response": res_state})
+            _log_event(events_path, "fault", {"label": label, "port": int(port), "fault": "crash_sim", "enable": False, "response": res_fault, "at_sec": at_sec})
+            _log_event(events_path, "state", {"label": label, "port": int(port), "sensor_state": "RECOVERING", "response": res_state, "at_sec": at_sec})
         return
 
     if kind == "reset_batch":
         for port in action.get("ports", []):
             res_reset = _inject_fault(port, "reset", True, period_sec=action.get("period_sec", 4))
             res_state = _inject_state(port, "NORMAL")
-            _log_event(events_path, "fault", {"label": label, "port": int(port), "fault": "reset", "enable": True, "response": res_reset})
-            _log_event(events_path, "state", {"label": label, "port": int(port), "sensor_state": "NORMAL", "response": res_state})
+            _log_event(events_path, "fault", {"label": label, "port": int(port), "fault": "reset", "enable": True, "response": res_reset, "at_sec": at_sec})
+            _log_event(events_path, "state", {"label": label, "port": int(port), "sensor_state": "NORMAL", "response": res_state, "at_sec": at_sec})
         return
 
     if kind == "fault_toggle":
@@ -2760,6 +4428,7 @@ def _apply_action(action, events_path):
                 "enable": bool(action.get("enable", True)),
                 "period_sec": int(action.get("period_sec", 4)),
                 "response": res,
+                "at_sec": at_sec,
             },
         )
         return
@@ -2767,7 +4436,7 @@ def _apply_action(action, events_path):
     if kind == "state_batch":
         for port in action.get("ports", []):
             res = _inject_state(port, action.get("sensor_state", "NORMAL"))
-            _log_event(events_path, "state", {"label": label, "port": int(port), "sensor_state": str(action.get("sensor_state", "NORMAL")), "response": res})
+            _log_event(events_path, "state", {"label": label, "port": int(port), "sensor_state": str(action.get("sensor_state", "NORMAL")), "response": res, "at_sec": at_sec})
         return
 
     raise ValueError("unsupported action kind: {}".format(kind))
@@ -2788,7 +4457,7 @@ def _run_active_window(spec, base_port, number_of_nodes, run_index, seed, events
     sample_index = 0
     action_index = 0
 
-    _log_event(events_path, "stage", {"name": "active_window_start", "duration_sec": duration_sec})
+    _log_event(events_path, "stage", {"name": "active_window_start", "duration_sec": duration_sec, "at_sec": 0.0})
 
     while True:
         now = time.monotonic()
@@ -2806,9 +4475,9 @@ def _run_active_window(spec, base_port, number_of_nodes, run_index, seed, events
             try:
                 res = _trigger_push(port, label)
                 ok = bool(res.get("data", {}).get("success", False))
-                _log_event(events_path, "trigger", {"port": int(port), "label": label, "ok": ok, "response": res})
+                _log_event(events_path, "trigger", {"port": int(port), "label": label, "ok": ok, "response": res, "at_sec": round(float(elapsed), 3)})
             except Exception as exc:
-                _log_event(events_path, "trigger_error", {"port": int(port), "label": label, "error": str(exc)})
+                _log_event(events_path, "trigger_error", {"port": int(port), "label": label, "error": str(exc), "at_sec": round(float(elapsed), 3)})
             trigger_index += 1
             next_trigger += float(trigger_interval_sec)
 
@@ -2825,7 +4494,7 @@ def _run_active_window(spec, base_port, number_of_nodes, run_index, seed, events
 
     active_duration_sec = round(float(time.monotonic() - start), 3)
 
-    _log_event(events_path, "done", {"active_duration_sec": active_duration_sec, "trigger_count": int(trigger_index)})
+    _log_event(events_path, "done", {"active_duration_sec": active_duration_sec, "trigger_count": int(trigger_index), "at_sec": active_duration_sec})
     return active_duration_sec, int(trigger_index)
 
 
@@ -2848,6 +4517,8 @@ def _collect_evidence(spec, run_dir, events_path, base_port, number_of_nodes, ru
     }
     nodes = {}
     reachable = 0
+    false_positive_nodes = 0
+    false_unavailable_refs = 0
 
     for port in range(int(base_port), int(base_port) + int(number_of_nodes)):
         try:
@@ -2858,10 +4529,18 @@ def _collect_evidence(spec, run_dir, events_path, base_port, number_of_nodes, ru
                 counters = {}
             for key in totals:
                 totals[key] += _to_int(counters.get(key, 0), 0)
+            false_positive_flag = _false_positive_flag_from_state(state)
+            false_unavailable_count = _false_unavailable_refs_from_state(state)
+            false_positive_nodes += int(false_positive_flag)
+            false_unavailable_refs += int(false_unavailable_count)
             nodes[str(port)] = {
                 "reachable": True,
                 "state": state,
                 "msg_counters": counters,
+                "derived": {
+                    "false_positive_flag": int(false_positive_flag),
+                    "false_unavailable_refs": int(false_unavailable_count),
+                },
             }
             reachable += 1
         except Exception as exc:
@@ -2914,7 +4593,7 @@ def _collect_evidence(spec, run_dir, events_path, base_port, number_of_nodes, ru
                 "view": str(view),
                 "watch_port": int(port),
                 "reachable": bool(node_info.get("reachable", False)),
-                "protocol_state": str(state.get("protocol_state", "")),
+                "protocol_state": _resolved_protocol_state_from_state(state),
                 "boundary_kind": str(state.get("boundary_kind", "")),
                 "score": _to_float(state.get("score", 0.0), 0.0),
                 "front_score": _to_float(state.get("front_score", 0.0), 0.0),
@@ -2931,10 +4610,10 @@ def _collect_evidence(spec, run_dir, events_path, base_port, number_of_nodes, ru
                 "total_bytes": int(total_bytes),
                 "total_mb": round(float(total_bytes) / 1048576.0, 3),
                 "direction_label": str(layer2.get("direction_label", "")),
-                "phase": str(layer2.get("phase", "")),
+                "phase": _resolved_phase_from_state(state),
                 "distance_hops": _to_float(layer2.get("distance_hops", 99.0), 99.0),
                 "eta_cycles": _to_float(layer2.get("eta_cycles", 99.0), 99.0),
-                "current_missing_count": len(state.get("current_missing_neighbors", [])) if isinstance(state.get("current_missing_neighbors"), list) else 0,
+                "current_missing_count": _false_unavailable_refs_from_state(state),
                 "crash_sim": bool(faults.get("crash_sim", False)),
                 "lie_sensor": bool(faults.get("lie_sensor", False)),
                 "flap": bool(faults.get("flap", False)),
@@ -2973,6 +4652,15 @@ def _collect_evidence(spec, run_dir, events_path, base_port, number_of_nodes, ru
         "tx_fail_total": int(totals["tx_fail"]),
         "tx_timeout_total": int(totals["tx_timeout"]),
         "tx_conn_error_total": int(totals["tx_conn_error"]),
+        "detection_speed_sec": "",
+        "first_watch_sec": "",
+        "first_impact_sec": "",
+        "outage_sec": "",
+        "recovery_sec": "",
+        "reset_sec": "",
+        "false_positive_nodes": int(false_positive_nodes),
+        "false_unavailable_refs": int(false_unavailable_refs),
+        "settle_accuracy_pct": round(100.0 * max(0.0, 1.0 - (float(false_positive_nodes) / max(1, int(number_of_nodes)))), 1),
         "status": "OK" if int(reachable) == int(number_of_nodes) else "WARN",
     }
 
@@ -2988,6 +4676,7 @@ def _collect_evidence(spec, run_dir, events_path, base_port, number_of_nodes, ru
         "run_index": int(run_index),
         "seed": int(seed),
         "watch_ports": watch_ports,
+        "scenario_kind": str(spec.get("scenario", {}).get("kind", "")).strip().lower(),
         "spec_path": str(spec.get("_spec_path", "")),
     }
 
@@ -3001,11 +4690,30 @@ def _write_run_reports(run_dir, manifest, summary_row, watch_rows, evidence, eve
     all_nodes_tsv_path = run_dir / "paper_all_nodes.tsv"
     history_tsv_path = run_dir / "paper_pull_history.tsv"
     history_totals_tsv_path = run_dir / "paper_pull_totals.tsv"
+    timeline_tsv_path = run_dir / "paper_timeline.tsv"
+    fire_stage_tsv_path = run_dir / "paper_fire_stages.tsv"
     evidence_path = run_dir / "paper_evidence.json"
     summary_md_path = run_dir / "paper_summary.md"
     history_rows = _load_jsonl(history_path) if history_path else []
     history_totals_rows = _load_jsonl(history_totals_path) if history_totals_path else []
+    events_rows = _load_jsonl(events_path)
     node_rows = _all_node_rows(evidence)
+    timeline_rows, timeline_metrics = _derive_run_timeline(
+        spec={"scenario": {"kind": manifest.get("scenario_kind", "")}},
+        manifest=manifest,
+        history_rows=history_rows,
+        events_rows=events_rows,
+    )
+    fire_stage_rows = _fire_stage_rows(events_rows) if str(manifest.get("scenario_kind", "")).strip().lower() == "firebomb" else []
+    local_port = _to_int(manifest.get("watch_ports", {}).get("LOCAL", 0), 0)
+    far_port = _to_int(manifest.get("watch_ports", {}).get("FAR", 0), 0)
+    local_history = _history_rows_for_port(history_rows, local_port) if local_port > 0 else []
+    far_history = _history_rows_for_port(history_rows, far_port) if far_port > 0 else []
+    summary_row.update(timeline_metrics)
+    summary_row["settle_accuracy_pct"] = round(100.0 * max(0.0, 1.0 - (_to_float(summary_row.get("false_positive_nodes", 0), 0.0) / max(1, _to_int(summary_row.get("total_nodes", 1), 1)))), 1)
+    evidence["timeline"] = timeline_rows
+    evidence["fire_stages"] = fire_stage_rows
+    figure_links = _write_run_figure_exports(run_dir, history_totals_rows, local_history, far_history, timeline_rows)
 
     _write_json(manifest_path, manifest)
     _write_json(evidence_path, evidence)
@@ -3014,7 +4722,21 @@ def _write_run_reports(run_dir, manifest, summary_row, watch_rows, evidence, eve
     _write_tsv(all_nodes_tsv_path, node_rows, NODE_FIELDS)
     _write_tsv(history_tsv_path, history_rows, HISTORY_FIELDS)
     _write_tsv(history_totals_tsv_path, history_totals_rows, HISTORY_TOTAL_FIELDS)
-    _write_run_html(run_dir, manifest, summary_row, watch_rows, evidence, events_path, history_rows=history_rows, history_totals_rows=history_totals_rows)
+    _write_tsv(timeline_tsv_path, timeline_rows, TIMELINE_FIELDS)
+    _write_tsv(fire_stage_tsv_path, fire_stage_rows, FIRE_STAGE_FIELDS)
+    _write_run_html(
+        run_dir,
+        manifest,
+        summary_row,
+        watch_rows,
+        evidence,
+        events_path,
+        history_rows=history_rows,
+        history_totals_rows=history_totals_rows,
+        timeline_rows=timeline_rows,
+        fire_stage_rows=fire_stage_rows,
+        figure_links=figure_links,
+    )
 
     lines = [
         "# {}".format(manifest.get("phase_name", "Paper Evaluation Run")),
@@ -3049,6 +4771,9 @@ def _write_run_reports(run_dir, manifest, summary_row, watch_rows, evidence, eve
         "- All-node TSV: `{}`".format(all_nodes_tsv_path.name),
         "- Pull-history TSV: `{}`".format(history_tsv_path.name),
         "- Pull-totals TSV: `{}`".format(history_totals_tsv_path.name),
+        "- Timeline TSV: `{}`".format(timeline_tsv_path.name),
+        "- Fire-stage TSV: `{}`".format(fire_stage_tsv_path.name),
+        "- Figure exports: `figure_exports/README.md`",
     ]
     with open(summary_md_path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
@@ -3086,6 +4811,12 @@ def _suite_summary_rows(summary_rows):
         totals_mb = [float(item.get("total_mb", 0.0)) for item in rows]
         push_rx_total = [int(item.get("push_rx_total", 0)) for item in rows]
         tx_fail_total = [int(item.get("tx_fail_total", 0)) for item in rows]
+        detection_values = [_maybe_float(item.get("detection_speed_sec")) for item in rows]
+        detection_values = [float(value) for value in detection_values if value is not None]
+        false_positive_values = [int(_to_int(item.get("false_positive_nodes", 0), 0)) for item in rows]
+        false_unavailable_values = [int(_to_int(item.get("false_unavailable_refs", 0), 0)) for item in rows]
+        settle_accuracy_values = [_maybe_float(item.get("settle_accuracy_pct")) for item in rows]
+        settle_accuracy_values = [float(value) for value in settle_accuracy_values if value is not None]
         out.append(
             {
                 "phase_id": key[0],
@@ -3096,6 +4827,10 @@ def _suite_summary_rows(summary_rows):
                 "avg_total_mb": round(statistics.mean(totals_mb), 3) if totals_mb else 0.0,
                 "avg_push_rx_total": round(statistics.mean(push_rx_total), 3) if push_rx_total else 0.0,
                 "avg_tx_fail_total": round(statistics.mean(tx_fail_total), 3) if tx_fail_total else 0.0,
+                "avg_detection_speed_sec": round(statistics.mean(detection_values), 3) if detection_values else "",
+                "avg_false_positive_nodes": round(statistics.mean(false_positive_values), 3) if false_positive_values else 0.0,
+                "avg_false_unavailable_refs": round(statistics.mean(false_unavailable_values), 3) if false_unavailable_values else 0.0,
+                "avg_settle_accuracy_pct": round(statistics.mean(settle_accuracy_values), 1) if settle_accuracy_values else "",
             }
         )
     return out
@@ -3114,10 +4849,11 @@ def _write_suite_reports(report_dir, spec, summary_rows, watch_rows):
 
     summary_by_nodes_rows = _suite_summary_rows(summary_rows)
     comparison_rows = _build_protocol_comparison_rows()
+    figure_links = _write_suite_figure_exports(report_dir, summary_rows)
     _write_tsv(summary_by_nodes_tsv, summary_by_nodes_rows, SUMMARY_BY_NODES_FIELDS)
     _write_tsv(metric_averages_tsv, _metric_summary_rows(summary_rows, SUMMARY_CHART_FIELDS), ["metric", "samples", "avg", "min", "max", "latest"])
     _write_tsv(comparison_tsv, comparison_rows, COMPARISON_FIELDS)
-    _write_suite_html(report_dir, spec, summary_rows, watch_rows, summary_by_nodes_rows)
+    _write_suite_html(report_dir, spec, summary_rows, watch_rows, summary_by_nodes_rows, figure_links=figure_links)
 
     lines = [
         "# {}".format(spec.get("phase_name", "Paper Evaluation Suite")),
@@ -3132,6 +4868,7 @@ def _write_suite_reports(report_dir, spec, summary_rows, watch_rows):
         "- Grouped summary: `summary_by_nodes.tsv`",
         "- Metric averages: `metric_averages.tsv`",
         "- Protocol comparison: `protocol_comparison.tsv`",
+        "- Figure exports: `figure_exports/README.md`",
     ]
     with open(summary_md, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")

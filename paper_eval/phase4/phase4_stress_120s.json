@@ -1,0 +1,17 @@
+{
+  "suite_id": "phase4_stress_120s",
+  "phase_id": "phase4",
+  "phase_name": "Phase 4 - Adversarial Stress",
+  "protocol": "egess",
+  "challenge": "ghost_outage_noise",
+  "duration_sec": 120,
+  "base_port": 9000,
+  "trigger_interval_sec": 2,
+  "node_counts": [49, 64, 81],
+  "run_count": 30,
+  "seed_base": 3001,
+  "scenario": {
+    "kind": "ghost_outage_noise",
+    "fault_period_sec": 4
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "suite_id": "phase2_fire_60s",
+  "phase_id": "phase2",
+  "phase_name": "Phase 2 - Fire Spread And Bomb",
+  "protocol": "egess",
+  "challenge": "firebomb",
+  "duration_sec": 60,
+  "base_port": 9000,
+  "trigger_interval_sec": 2,
+  "node_counts": [49, 64, 81],
+  "run_count": 30,
+  "seed_base": 1501,
+  "scenario": {
+    "kind": "firebomb"
+  }
+}
