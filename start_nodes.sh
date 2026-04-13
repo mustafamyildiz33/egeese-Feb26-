@@ -85,7 +85,7 @@ for ((i=0; i<TOTAL_NODES; i++)); do
   elif [[ "$EGESS_NODE_LOG_MODE" == "none" || "$EGESS_NODE_LOG_MODE" == "off" ]]; then
     nohup "$PYTHON_BIN" -u node.py "$PORT" "$TOTAL_NODES" > /dev/null 2>&1 < /dev/null &
   else
-    nohup bash -c '"$1" -u node.py "$2" "$3" 2>&1 | "$1" tools/bounded_log.py "$4" "$5"' _ "$PYTHON_BIN" "$PORT" "$TOTAL_NODES" "$LOG_PATH" "$EGESS_NODE_LOG_MAX_BYTES" < /dev/null &
+    nohup "$PYTHON_BIN" tools/run_bounded_node.py "$PYTHON_BIN" node.py "$PORT" "$TOTAL_NODES" "$LOG_PATH" "$EGESS_NODE_LOG_MAX_BYTES" > /dev/null 2>&1 < /dev/null &
   fi
   echo "$!" >> "$PIDS_FILE"
 done

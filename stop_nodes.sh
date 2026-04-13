@@ -37,10 +37,35 @@ if [[ -z "$RUN_DIR" ]]; then
   fi
 fi
 
-if [[ -n "$RUN_DIR" && -f "$RUN_DIR/pids.txt" ]]; then
+kill_pids_file() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
   while IFS= read -r pid; do
+    [[ -z "$pid" ]] && continue
     kill "$pid" 2>/dev/null || true
-  done < "$RUN_DIR/pids.txt"
+  done < "$file"
+}
+
+if [[ -n "$BASE_PORT" ]]; then
+  MAX_NODES=0
+  shopt -s nullglob
+  for pids_file in runs/*_p"${BASE_PORT}"/pids.txt; do
+    count="$(wc -l < "$pids_file" | tr -d ' ')"
+    if [[ "$count" =~ ^[0-9]+$ && "$count" -gt "$MAX_NODES" ]]; then
+      MAX_NODES="$count"
+    fi
+    kill_pids_file "$pids_file"
+  done
+  shopt -u nullglob
+
+  if [[ "$MAX_NODES" -gt 0 ]]; then
+    END_PORT=$((BASE_PORT + MAX_NODES - 1))
+    for port in $(seq "$BASE_PORT" "$END_PORT"); do
+      pkill -f "node.py ${port} " 2>/dev/null || true
+    done
+  fi
+elif [[ -n "$RUN_DIR" && -f "$RUN_DIR/pids.txt" ]]; then
+  kill_pids_file "$RUN_DIR/pids.txt"
 fi
 
 if [[ "$KILL_ALL" -eq 1 ]]; then
