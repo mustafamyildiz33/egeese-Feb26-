@@ -5851,7 +5851,8 @@ def _apply_action(action, events_path):
 
 def _run_active_window(spec, base_port, number_of_nodes, run_index, seed, events_path, history_path=None, history_totals_path=None, run_dir=None):
     duration_sec = _to_float(spec.get("duration_sec", 60), 60.0)
-    trigger_interval_sec = max(0.25, _to_float(spec.get("trigger_interval_sec", 2), 2.0))
+    trigger_interval_raw = _to_float(spec.get("trigger_interval_sec", 2), 2.0)
+    trigger_interval_sec = max(0.25, trigger_interval_raw) if trigger_interval_raw > 0.0 else None
     sample_interval_sec = max(0.5, _to_float(spec.get("sample_interval_sec", 1.0), 1.0))
     ports = list(range(int(base_port), int(base_port) + int(number_of_nodes)))
     actions = sorted(_scenario_actions(spec, base_port, number_of_nodes, seed), key=lambda item: float(item.get("at_sec", 0.0)))
@@ -5859,7 +5860,7 @@ def _run_active_window(spec, base_port, number_of_nodes, run_index, seed, events
 
     start = time.monotonic()
     deadline = start + float(duration_sec)
-    next_trigger = start
+    next_trigger = start if trigger_interval_sec is not None else None
     next_sample = start
     trigger_index = 0
     sample_index = 0
@@ -5882,7 +5883,7 @@ def _run_active_window(spec, base_port, number_of_nodes, run_index, seed, events
         if now >= deadline:
             break
 
-        if now >= next_trigger:
+        if next_trigger is not None and now >= next_trigger:
             port = ports[trigger_index % len(ports)]
             label = "{}_run{}_idx{}".format(str(spec.get("challenge", "demo")), int(run_index), int(trigger_index))
             try:
@@ -5892,7 +5893,7 @@ def _run_active_window(spec, base_port, number_of_nodes, run_index, seed, events
             except Exception as exc:
                 _log_event(events_path, "trigger_error", {"port": int(port), "label": label, "error": str(exc), "at_sec": round(float(elapsed), 3)})
             trigger_index += 1
-            next_trigger = time.monotonic() + float(trigger_interval_sec)
+            next_trigger += float(trigger_interval_sec)
             now = time.monotonic()
             elapsed = now - start
             while action_index < len(actions) and elapsed >= float(actions[action_index].get("at_sec", 0.0)):

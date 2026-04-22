@@ -90,6 +90,101 @@ cd /Users/mustafa/egess
 ./run_paper_eval.sh --base-port 9100 --mode all --duration 60 --batches 30 --nodes 49,64 --proof-lite
 ```
 
+## Ghost-Only Cross-Protocol Rerun
+
+For the paper fairness rerun, compare only the ghost/stress phase
+(`phase4` / `ghost_outage_noise`) for EGESS (edge mapping) and Check-In.
+Use node counts `49,64,81`.
+
+The ghost/stress setup is now much more aligned across the two protocols than
+it was before. The injected phase schedule, watched-node selection, trigger
+cadence, and key eval settings are matched much more closely. Still, EGESS and
+Check-In are different protocols, so do not claim they are fully identical.
+The fair wording is: the comparison harness is now much more similar and much
+fairer, but not a guarantee of perfectly identical protocol behavior.
+
+Use `--proof-lite` for this rerun. It keeps the final dashboards, figure
+exports, Google Sheets CSVs, and a small proof trail, while keeping logs
+bounded so the run does not balloon disk usage. Do not use `--full-logs` or
+`--full-evidence` for this collection.
+
+Before the real run, you can preview storage without starting nodes:
+
+```bash
+cd /Users/mustafa/egess
+./run_paper_eval.sh --base-port 9100 --mode phase4 --duration 60 --batches 30 --nodes 49,64,81 --proof-lite --dry-run
+cd /Users/mustafa/egess/external/checkin-egess-eval
+./run_paper_eval.sh --base-port 9200 --mode phase4 --duration 60 --batches 30 --nodes 49,64,81 --proof-lite --dry-run
+```
+
+Before the full 30-batch rerun, do a real 1-batch pre-test on both protocols
+to make sure the ghost-only path starts cleanly, runs end to end, and writes
+the expected report folders:
+
+```bash
+cd /Users/mustafa/egess
+./run_paper_eval.sh --base-port 9100 --mode phase4 --duration 60 --batches 1 --nodes 49,64,81 --proof-lite
+
+cd /Users/mustafa/egess/external/checkin-egess-eval
+./run_paper_eval.sh --base-port 9200 --mode phase4 --duration 60 --batches 1 --nodes 49,64,81 --proof-lite
+```
+
+If both 1-batch pre-tests finish and write the expected `paper_reports/`
+folders, then run the full 30-batch collection.
+
+If you want one full 30-batch run per protocol:
+
+```bash
+cd /Users/mustafa/egess
+./run_paper_eval.sh --base-port 9100 --mode phase4 --duration 60 --batches 30 --nodes 49,64,81 --proof-lite
+
+cd /Users/mustafa/egess/external/checkin-egess-eval
+./run_paper_eval.sh --base-port 9200 --mode phase4 --duration 60 --batches 30 --nodes 49,64,81 --proof-lite
+```
+
+If you want the same safer chunked workflow as the all-scenarios run, use five
+6-batch chunks per protocol:
+
+```bash
+cd /Users/mustafa/egess
+./run_paper_eval.sh --base-port 9100 --mode phase4 --duration 60 --batches 6 --batch-start 1  --nodes 49,64,81 --proof-lite
+./run_paper_eval.sh --base-port 9100 --mode phase4 --duration 60 --batches 6 --batch-start 7  --nodes 49,64,81 --proof-lite
+./run_paper_eval.sh --base-port 9100 --mode phase4 --duration 60 --batches 6 --batch-start 13 --nodes 49,64,81 --proof-lite
+./run_paper_eval.sh --base-port 9100 --mode phase4 --duration 60 --batches 6 --batch-start 19 --nodes 49,64,81 --proof-lite
+./run_paper_eval.sh --base-port 9100 --mode phase4 --duration 60 --batches 6 --batch-start 25 --nodes 49,64,81 --proof-lite
+
+cd /Users/mustafa/egess/external/checkin-egess-eval
+./run_paper_eval.sh --base-port 9200 --mode phase4 --duration 60 --batches 6 --batch-start 1  --nodes 49,64,81 --proof-lite
+./run_paper_eval.sh --base-port 9200 --mode phase4 --duration 60 --batches 6 --batch-start 7  --nodes 49,64,81 --proof-lite
+./run_paper_eval.sh --base-port 9200 --mode phase4 --duration 60 --batches 6 --batch-start 13 --nodes 49,64,81 --proof-lite
+./run_paper_eval.sh --base-port 9200 --mode phase4 --duration 60 --batches 6 --batch-start 19 --nodes 49,64,81 --proof-lite
+./run_paper_eval.sh --base-port 9200 --mode phase4 --duration 60 --batches 6 --batch-start 25 --nodes 49,64,81 --proof-lite
+```
+
+If you chunk the ghost-only runs, merge them with the phase/challenge filters
+so you get the same merged HTML flow and portable ZIP bundle as the normal
+all-scenario export:
+
+```bash
+cd /Users/mustafa/egess
+./.venv/bin/python merge_paper_reports.py --base-port 9100 --nodes 49,64,81 --duration-sec 60 --phase phase4 --challenge ghost_outage_noise --expected-batches 30
+./.venv/bin/python merge_paper_reports.py --root checkin=/Users/mustafa/egess/external/checkin-egess-eval/paper_reports --base-port 9200 --nodes 49,64,81 --duration-sec 60 --phase phase4 --challenge ghost_outage_noise --expected-batches 30
+```
+
+Those merged folders are written under `merged_paper_reports/`. Each merged
+`index.html` includes the normal `Download Export Bundle` button and writes a
+matching `*_portable_export.zip`, so you can zip and move the ghost-only
+results the same way as the larger paper batches.
+
+If you chunk the ghost-only rerun, you can also checkpoint a chunk the same way
+as the all-scenarios flow, but with the ghost-only node set:
+
+```bash
+cd /Users/mustafa/egess
+./.venv/bin/python check_chunk_status.py --base-port 9100 --batch-start 1 --batches 6 --nodes 49,64,81
+./.venv/bin/python check_chunk_status.py --root /Users/mustafa/egess/external/checkin-egess-eval --base-port 9200 --batch-start 1 --batches 6 --nodes 49,64,81
+```
+
 For safer lab collection, run the same 30 batches as five 6-batch chunks. The
 `--batch-start` value keeps batch numbers and seeds unique across chunks:
 
